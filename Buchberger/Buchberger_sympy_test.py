@@ -4,7 +4,6 @@ from sympy.polys.orderings import lex, grlex
 
 from sympy.polys.rings import ring, xring
 from sympy.polys.domains import ZZ, QQ
-from sympy.polys.groebnertools import is_groebner, is_minimal, is_reduced
 
 from BuchbergerSympy import buchberger as Buchberger
 
