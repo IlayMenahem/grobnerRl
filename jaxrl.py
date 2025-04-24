@@ -1,12 +1,57 @@
 from dataclasses import dataclass
 from collections import deque
 import random
+import os
 
 import jax
 import jax.numpy as jnp
 import equinox as eqx
 import optax
+import distrax
 import gymnasium as gym
+from tqdm import tqdm
+
+
+def callback_save_model(model, directory: str, filename: str) -> None:
+    '''
+    saves the model to the specified directory
+
+    Args:
+    - model (eqx.Module): the model to save
+    - directory (str): the directory to save the model to
+    - filename (str): the name of the file to save the model to
+    '''
+    path = os.path.join(directory, filename)
+    eqx.tree_serialise_leaves(path, model)
+
+
+def callback_eval(model, env, num_episodes: int) -> float:
+    '''
+    evaluates the model on the specified environment
+
+    Args:
+    - model (eqx.Module): the model to evaluate
+    - env (gym.Env): the environment to evaluate the model on
+    - num_episodes (int): number of episodes to evaluate the model on
+
+    Returns:
+    - average_reward (float): average reward over the evaluated episodes
+    '''
+    total_reward = 0.0
+
+    for _ in range(num_episodes):
+        obs, _ = env.reset()
+        done = False
+
+        while not done:
+            action = int(select_action_infrecne(model, obs).item())
+            obs, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            total_reward += reward
+
+    mean_reward = total_reward / num_episodes
+
+    return mean_reward
 
 
 class poll_agent(eqx.Module):
@@ -38,6 +83,7 @@ class poll_agent(eqx.Module):
 
         return q_values
 
+
 @dataclass(frozen=True)
 class TimeStep:
     obs: jnp.ndarray
@@ -45,6 +91,7 @@ class TimeStep:
     reward: float
     next_obs: jnp.ndarray
     done: bool
+
 
 class ReplayBuffer:
     queue: deque[TimeStep]
@@ -73,6 +120,24 @@ class ReplayBuffer:
     def can_sample(self) -> bool:
         return len(self.queue) >= self.batch_size
 
+
+@eqx.filter_jit
+def select_action_infrecne(dqn: eqx.Module, obs: jnp.ndarray):
+    '''
+    selects an action using the DQN model
+
+    Args:
+    - dqn (eqx.Module): the DQN model
+    - obs (jnp.ndarray): current observation
+
+    returns:
+    - action: selected action
+    '''
+    q_vals = eqx.nn.inference_mode(dqn)(obs)
+    chosen_action = distrax.Greedy(q_vals).sample()
+
+    return chosen_action
+
 @eqx.filter_jit
 def select_action(dqn: eqx.Module, obs: jnp.ndarray, epsilon: float, key) -> jnp.ndarray:
     '''
@@ -88,10 +153,7 @@ def select_action(dqn: eqx.Module, obs: jnp.ndarray, epsilon: float, key) -> jnp
     - action: selected action
     '''
     q_vals = eqx.nn.inference_mode(dqn)(obs)
-    greedy_actions = jnp.argmax(q_vals, axis=-1)
-    expolation_actions = jax.random.randint(key, shape=greedy_actions.shape, minval=0, maxval=q_vals.shape[-1])
-    is_greedy = jax.random.bernoulli(key, p=1-epsilon)
-    chosen_action = jnp.where(is_greedy, greedy_actions, expolation_actions)
+    chosen_action = distrax.EpsilonGreedy(q_vals, epsilon).sample(seed=key)
 
     return chosen_action
 
@@ -129,6 +191,18 @@ def compute_loss(q_network: eqx.Module, target_network: eqx.Module, gamma: float
 
     return loss
 
+
+def learner_step(replay_buffer, gamma, q_network, target_network, optimizer, optimizer_state, loss_fn):
+    loss_and_grad = eqx.filter_value_and_grad(loss_fn)
+
+    batch = replay_buffer.sample_batch()
+    loss, grads = loss_and_grad(q_network, target_network, gamma, batch)
+    updates, optimizer_state = optimizer.update(grads, optimizer_state, q_network)
+    q_network = eqx.apply_updates(q_network, updates)
+
+    return q_network, loss, optimizer_state, optimizer
+
+
 def train_dqn(env: gym.Env, replay_buffer: ReplayBuffer, epsilon_scheduler, target_update_freq,
               gamma: float, q_network: eqx.Module, target_network: eqx.Module, optimizer: optax.GradientTransformation,
               optimizer_state, num_steps: int, key) -> tuple[eqx.Module, list[float], list[float], list[float]]:
@@ -157,11 +231,10 @@ def train_dqn(env: gym.Env, replay_buffer: ReplayBuffer, epsilon_scheduler, targ
     scores = []
     losses = []
     epsilons = []
+    progress_bar = tqdm(total=num_steps, unit="step")
     episode_score = 0.0
 
     obs, _ = env.reset(seed=0)
-
-    loss_and_grad = eqx.filter_value_and_grad(compute_loss)
 
     for step in range(num_steps):
         epsilon = epsilon_scheduler(step)
@@ -174,26 +247,25 @@ def train_dqn(env: gym.Env, replay_buffer: ReplayBuffer, epsilon_scheduler, targ
         episode_score += reward
 
         replay_buffer.store(obs, action, reward, next_obs, done)
-
         obs = next_obs
+        progress_bar.update(1)
 
         if done:
-            print(f"Step: {step}, Episode Score: {episode_score}, Epsilon: {epsilon:.3f}")
+            progress_bar.set_postfix_str(f"Episode score: {episode_score:.2f}")
+            progress_bar.refresh()
             scores.append(episode_score)
-            obs, _ = env.reset()
             episode_score = 0.0
+            obs, _ = env.reset()
 
         if replay_buffer.can_sample():
-            batch = replay_buffer.sample_batch()
-            loss, grads = loss_and_grad(q_network, target_network, gamma, batch)
-            updates, optimizer_state = optimizer.update(grads, optimizer_state, q_network)
-            q_network = eqx.apply_updates(q_network, updates)
+            q_network, loss, optimizer_state, optimizer = learner_step(replay_buffer, gamma, q_network, target_network, optimizer, optimizer_state, compute_loss)
             losses.append(loss.item())
 
         if step % target_update_freq == 0:
             target_network = eqx.tree_at(lambda m: m, target_network, q_network)
 
     return q_network, scores, losses, epsilons
+
 
 def train_rainbow():
     raise NotImplementedError
