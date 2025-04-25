@@ -1,4 +1,6 @@
 # set up
+install [sage](https://www.sagemath.org)
+
 run
 ```bash
 python -m pip install -r requirements.txt

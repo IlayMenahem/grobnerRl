@@ -6,3 +6,4 @@ gymnasium
 tqdm
 numpy
 matplotlib
+sympy
