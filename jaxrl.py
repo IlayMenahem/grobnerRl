@@ -12,6 +12,7 @@ import gymnasium as gym
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
+import scipy
 
 
 def callback_save_model(model, directory: str, filename: str) -> None:
@@ -136,7 +137,7 @@ def select_action_infrecne(dqn: eqx.Module, obs: jnp.ndarray):
     - action: selected action
     '''
     q_vals = eqx.nn.inference_mode(dqn)(obs)
-    chosen_action = distrax.Greedy(q_vals).sample()
+    chosen_action = distrax.Greedy(q_vals).sample(seed=0)
 
     return chosen_action
 
@@ -255,17 +256,22 @@ def plot_learning_process(scores: list[float], losses: list[float], epsilons: li
     Returns:
     None
     '''
+    # smooth the losses
+    smoothing_length_losses = 100
+    smoothed_losses = scipy.signal.convolve(losses, np.ones(smoothing_length_losses) / smoothing_length_losses, mode='valid')
+    smoothing_length_scores = 5
+    smoothed_scores = scipy.signal.convolve(scores, np.ones(smoothing_length_scores) / smoothing_length_scores, mode='valid')
 
     plt.figure(figsize=(20, 5))
     plt.subplot(131)
-    plt.title(f'score: {np.mean(scores[-10:]) if scores else 0:.2f}')
-    plt.plot(scores)
+    plt.title(f'score: {smoothed_scores[-1] if scores else 0:.2f}')
+    plt.plot(smoothed_scores)
     plt.xlabel("Episode")
     plt.ylabel("Score")
     plt.grid(True)
     plt.subplot(132)
     plt.title('loss')
-    plt.plot(losses)
+    plt.plot(smoothed_losses)
     plt.xlabel("Update step")
     plt.ylabel("Loss")
     plt.grid(True)
@@ -328,8 +334,6 @@ def train_dqn(env: gym.Env, replay_buffer: ReplayBuffer, epsilon_scheduler, targ
         progress_bar.update(1)
 
         if done:
-            progress_bar.set_postfix_str(f"Score: {episode_score:.2f}")
-            progress_bar.refresh()
             scores.append(episode_score)
             episode_score = 0.0
             obs, _ = env.reset()
@@ -340,6 +344,9 @@ def train_dqn(env: gym.Env, replay_buffer: ReplayBuffer, epsilon_scheduler, targ
             losses.append(loss.item())
 
         if step % target_update_freq == 0:
+            eval = callback_eval(q_network, env, 10)
+            progress_bar.set_postfix_str(f"Score: {eval:.2f}")
+            progress_bar.refresh()
             target_network = eqx.tree_at(lambda m: m, target_network, q_network)
 
     progress_bar.close()
@@ -357,25 +364,25 @@ def train_a3c():
 
 if __name__ == "__main__":
 
-    num_steps = 100000
+    num_steps = 50000
     gamma = 0.99
     seed = 0
-    target_update_freq = 500
+    target_update_freq = 125
 
     capacity = 20000
-    batch_size = 256
+    batch_size = 512
 
     initial_epsilon = 1.0
-    transition_steps = 10000
+    transition_steps = 20000
     final_epsilon = 0.1
-    learning_rate = 1e-4
-    max_norm = 0.1
+    learning_rate = 4e-5
+    max_norm = 0.25
 
     key = jax.random.key(seed)
     key, subkey1, subkey2 = jax.random.split(key, 3)
-    q_network = poll_agent(4, 2, subkey1)
-    target_network = poll_agent(4, 2, subkey2)
-    env = gym.make("CartPole-v1", max_episode_steps=1000)
+    q_network = poll_agent(6, 3, subkey1)
+    target_network = poll_agent(6, 3, subkey2)
+    env = gym.make('Acrobot-v1', max_episode_steps=250)
 
     replay_buffer = ReplayBuffer(capacity, batch_size)
 
