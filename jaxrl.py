@@ -77,7 +77,7 @@ class poll_agent(eqx.Module):
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         x = jax.nn.relu(self.linear1(x))
         x = jax.nn.relu(self.linear2(x))
-        
+
         state_value = self.state_value(x)
         advantage = self.advantage(x)
 
@@ -104,10 +104,10 @@ class ReplayBuffer:
         self.queue = deque(maxlen=size)
         self.max_size = size
         self.batch_size = batch_size
-    
+
     def store(self, obs: jnp.ndarray, act: int, rew: float, next_obs: jnp.ndarray, done: bool) -> None:
         self.queue.append(TimeStep(obs, act, rew, next_obs, done))
-    
+
     def sample_batch(self) -> dict[str, jnp.ndarray]:
         indecies = random.sample(range(len(self.queue)), k=self.batch_size)
         samples = [self.queue[i] for i in indecies]
@@ -121,20 +121,6 @@ class ReplayBuffer:
 
     def can_sample(self) -> bool:
         return len(self.queue) >= self.batch_size
-
-
-class PerReplayBuffer:
-    def __init__(self, size: int, batch_size: int) -> None:
-        raise NotImplementedError
-    
-    def store(self, obs: jnp.ndarray, act: int, rew: float, next_obs: jnp.ndarray, done: bool) -> None:
-        raise NotImplementedError
-    
-    def sample_batch(self) -> dict[str, jnp.ndarray]:
-        raise NotImplementedError
-    
-    def can_sample(self) -> bool:
-        raise NotImplementedError
 
 
 @eqx.filter_jit
@@ -153,6 +139,7 @@ def select_action_infrecne(dqn: eqx.Module, obs: jnp.ndarray):
     chosen_action = distrax.Greedy(q_vals).sample()
 
     return chosen_action
+
 
 @eqx.filter_jit
 def select_action(dqn: eqx.Module, obs: jnp.ndarray, epsilon: float, key) -> jnp.ndarray:
@@ -294,7 +281,7 @@ def plot_learning_process(scores: list[float], losses: list[float], epsilons: li
 
 def train_dqn(env: gym.Env, replay_buffer: ReplayBuffer, epsilon_scheduler, target_update_freq,
               gamma: float, q_network: eqx.Module, target_network: eqx.Module, optimizer: optax.GradientTransformation,
-              optimizer_state, num_steps: int, key) -> tuple[eqx.Module, list[float], list[float], list[float]]:
+              optimizer_state, num_steps: int, loss_fn, key) -> tuple[eqx.Module, list[float], list[float], list[float]]:
     '''
     trains a DQN agent
 
@@ -309,6 +296,7 @@ def train_dqn(env: gym.Env, replay_buffer: ReplayBuffer, epsilon_scheduler, targ
     - optimizer (optax.GradientTransformation): optimizer
     - optimizer_state: state of the optimizer
     - num_steps (int): number of training steps
+    - loss_fn: loss function
     - key: JAX random key
 
     Returns:
@@ -347,7 +335,8 @@ def train_dqn(env: gym.Env, replay_buffer: ReplayBuffer, epsilon_scheduler, targ
             obs, _ = env.reset()
 
         if replay_buffer.can_sample():
-            q_network, loss, optimizer_state, optimizer = learner_step(replay_buffer, gamma, q_network, target_network, optimizer, optimizer_state, double_dqn_loss)
+            q_network, loss, optimizer_state, optimizer = learner_step(replay_buffer, gamma,
+                q_network, target_network, optimizer, optimizer_state, loss_fn)
             losses.append(loss.item())
 
         if step % target_update_freq == 0:
@@ -359,11 +348,9 @@ def train_dqn(env: gym.Env, replay_buffer: ReplayBuffer, epsilon_scheduler, targ
     return q_network, scores, losses, epsilons
 
 
-def train_rainbow():
-    raise NotImplementedError
-
 def train_ppo():
     raise NotImplementedError
+
 
 def train_a3c():
     raise NotImplementedError
@@ -398,7 +385,7 @@ if __name__ == "__main__":
     optimizer = optax.chain(optax.clip_by_global_norm(max_norm), optax.adam(learning_rate))
     optimizer_state = optimizer.init(q_network)
 
-    train_dqn(env, replay_buffer, epsilon_shed, target_update_freq, gamma,
-                q_network, target_network, optimizer, optimizer_state, num_steps, key)
+    train_dqn(env, replay_buffer, epsilon_shed, target_update_freq, gamma, q_network,
+        target_network, optimizer, optimizer_state, num_steps, double_dqn_loss, key)
 
     env.close()
