@@ -10,6 +10,8 @@ import optax
 import distrax
 import gymnasium as gym
 from tqdm import tqdm
+import numpy as np
+import matplotlib.pyplot as plt
 
 
 def callback_save_model(model, directory: str, filename: str) -> None:
@@ -121,6 +123,20 @@ class ReplayBuffer:
         return len(self.queue) >= self.batch_size
 
 
+class PerReplayBuffer:
+    def __init__(self, size: int, batch_size: int) -> None:
+        raise NotImplementedError
+    
+    def store(self, obs: jnp.ndarray, act: int, rew: float, next_obs: jnp.ndarray, done: bool) -> None:
+        raise NotImplementedError
+    
+    def sample_batch(self) -> dict[str, jnp.ndarray]:
+        raise NotImplementedError
+    
+    def can_sample(self) -> bool:
+        raise NotImplementedError
+
+
 @eqx.filter_jit
 def select_action_infrecne(dqn: eqx.Module, obs: jnp.ndarray):
     '''
@@ -159,7 +175,7 @@ def select_action(dqn: eqx.Module, obs: jnp.ndarray, epsilon: float, key) -> jnp
 
 
 @eqx.filter_jit
-def compute_loss(q_network: eqx.Module, target_network: eqx.Module, gamma: float, batch: dict[str, jnp.ndarray]) -> jnp.ndarray:
+def dqn_loss(q_network: eqx.Module, target_network: eqx.Module, gamma: float, batch: dict[str, jnp.ndarray]) -> jnp.ndarray:
     '''
     computes the loss for the DQN
 
@@ -192,6 +208,43 @@ def compute_loss(q_network: eqx.Module, target_network: eqx.Module, gamma: float
     return loss
 
 
+@eqx.filter_jit
+def double_dqn_loss(q_network: eqx.Module, target_network: eqx.Module, gamma: float, batch: dict[str, jnp.ndarray]) -> jnp.ndarray:
+    '''
+    computes the loss for the Double DQN
+
+    Args:
+    - q_network (eqx.Module): the DQN model
+    - target_network (eqx.Module): the target DQN model
+    - gamma (float): discount factor
+    - batch (dict[str, jnp.ndarray]): batch of samples from the replay buffer
+
+    Returns:
+    - loss (jnp.ndarray): computed loss
+    '''
+
+    obs = batch['obs']
+    next_obs = batch['next_obs']
+    actions = batch['acts']
+    rewards = batch['rews']
+    done = batch['done']
+
+    q_vals = eqx.filter_vmap(q_network)(obs)
+    q_curr = jnp.take_along_axis(q_vals, actions[:, None], axis=-1).squeeze(-1)
+
+    target_q_next = eqx.filter_vmap(target_network)(next_obs)
+    online_actions_curr = jnp.argmax(q_vals, axis=-1)
+    q_next = target_q_next[jnp.arange(target_q_next.shape[0]), online_actions_curr]
+
+    mask = jnp.where(done, 0.0, 1.0)
+    target = jax.lax.stop_gradient(rewards + gamma * q_next * mask)
+
+    losses = optax.losses.huber_loss(q_curr, target)
+    loss = jnp.mean(losses)
+
+    return loss
+
+
 def learner_step(replay_buffer, gamma, q_network, target_network, optimizer, optimizer_state, loss_fn):
     loss_and_grad = eqx.filter_value_and_grad(loss_fn)
 
@@ -201,6 +254,42 @@ def learner_step(replay_buffer, gamma, q_network, target_network, optimizer, opt
     q_network = eqx.apply_updates(q_network, updates)
 
     return q_network, loss, optimizer_state, optimizer
+
+
+def plot_learning_process(scores: list[float], losses: list[float], epsilons: list[float]) -> None:
+    '''
+    Plots the training scores, losses, and epsilon values.
+
+    Args:
+    scores (List[float]): The training scores.
+    losses (List[float]): The training losses.
+    epsilons (List[float]): The epsilon values.
+
+    Returns:
+    None
+    '''
+
+    plt.figure(figsize=(20, 5))
+    plt.subplot(131)
+    plt.title(f'score: {np.mean(scores[-10:]) if scores else 0:.2f}')
+    plt.plot(scores)
+    plt.xlabel("Episode")
+    plt.ylabel("Score")
+    plt.grid(True)
+    plt.subplot(132)
+    plt.title('loss')
+    plt.plot(losses)
+    plt.xlabel("Update step")
+    plt.ylabel("Loss")
+    plt.grid(True)
+    plt.subplot(133)
+    plt.title('epsilons')
+    plt.plot(epsilons)
+    plt.xlabel("Update step")
+    plt.ylabel("Epsilon")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
 
 
 def train_dqn(env: gym.Env, replay_buffer: ReplayBuffer, epsilon_scheduler, target_update_freq,
@@ -251,18 +340,21 @@ def train_dqn(env: gym.Env, replay_buffer: ReplayBuffer, epsilon_scheduler, targ
         progress_bar.update(1)
 
         if done:
-            progress_bar.set_postfix_str(f"Episode score: {episode_score:.2f}")
+            progress_bar.set_postfix_str(f"Score: {episode_score:.2f}")
             progress_bar.refresh()
             scores.append(episode_score)
             episode_score = 0.0
             obs, _ = env.reset()
 
         if replay_buffer.can_sample():
-            q_network, loss, optimizer_state, optimizer = learner_step(replay_buffer, gamma, q_network, target_network, optimizer, optimizer_state, compute_loss)
+            q_network, loss, optimizer_state, optimizer = learner_step(replay_buffer, gamma, q_network, target_network, optimizer, optimizer_state, double_dqn_loss)
             losses.append(loss.item())
 
         if step % target_update_freq == 0:
             target_network = eqx.tree_at(lambda m: m, target_network, q_network)
+
+    progress_bar.close()
+    plot_learning_process(scores, losses, epsilons)
 
     return q_network, scores, losses, epsilons
 
@@ -278,22 +370,22 @@ def train_a3c():
 
 if __name__ == "__main__":
 
-    num_steps = 25000
+    num_steps = 100000
     gamma = 0.99
     seed = 0
     target_update_freq = 500
 
-    capacity = 10000
-    batch_size = 128
+    capacity = 20000
+    batch_size = 256
 
     initial_epsilon = 1.0
     transition_steps = 10000
     final_epsilon = 0.1
     learning_rate = 1e-4
-    max_norm = 1.0
+    max_norm = 0.1
 
     key = jax.random.key(seed)
-    key, subkey1, subkey2, subkey4 = jax.random.split(key, 4)
+    key, subkey1, subkey2 = jax.random.split(key, 3)
     q_network = poll_agent(4, 2, subkey1)
     target_network = poll_agent(4, 2, subkey2)
     env = gym.make("CartPole-v1", max_episode_steps=1000)
