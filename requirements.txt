@@ -1,0 +1,8 @@
+jax
+equinox
+optax
+distrax
+gymnasium
+tqdm
+numpy
+matplotlib

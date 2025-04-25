@@ -1,3 +1,9 @@
+# set up
+run
+```bash
+python -m pip install -r requirements.txt
+```
+
 # additional sources
 
 ## buchberger's algorithm, and math
@@ -16,7 +22,6 @@
 - [Manuel Kauers](https://github.com/mkauers/ore_algebra/releases)
 - [Christoph Koutschan](https://risc.jku.at/sw/holonomicfunctions/)
 - [Learning Selection Strategies in Buchbergers Algorithm](https://arxiv.org/pdf/2005.01917) and [code](https://github.com/dylanpeifer/deepgroebner)
-- [buchberger's algorithm benchmark]()
 
 ## RL algorithms implementation
 
