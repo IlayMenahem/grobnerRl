@@ -5,7 +5,7 @@ from sympy.polys.orderings import lex, grlex
 from sympy.polys.rings import ring, xring
 from sympy.polys.domains import ZZ, QQ
 
-from BuchbergerSympy import buchberger as Buchberger
+from BuchbergerSympy import groebner as Buchberger
 
 class TestBuchberger:
     def test_Buchberger_case1(self):
