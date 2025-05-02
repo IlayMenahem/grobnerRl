@@ -7,7 +7,7 @@ credit to the authors of the deepgroebner paper
 import bisect
 import numpy as np
 
-from ideals import IdealGenerator, parse_ideal_dist
+from .ideals import IdealGenerator, parse_ideal_dist
 
 
 def spoly(f, g, lmf=None, lmg=None):

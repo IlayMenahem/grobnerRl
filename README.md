@@ -13,6 +13,7 @@ python -m pip install -r requirements.txt
 - [buchberger's algorithm](http://www.scholarpedia.org/article/Buchberger%27s_algorithm#buchberger65)
 - [ore algebras](https://www3.risc.jku.at/research/combinat/software/ore_algebra/main.pdf)
 - [Use Gröbner Bases To Solve Polynomial Equations](https://jingnanshi.com/blog/groebner_basis.html#fn.3)
+- [Gröbner basis is EXPSPACE-complete](https://doi.org/10.1006%2Fjcom.1997.0447)
 
 ## LLM as Theorem provers
 
@@ -27,7 +28,7 @@ python -m pip install -r requirements.txt
 
 ## RL algorithms implementation
 
-- [port purejaxrl](https://github.com/luchris429/purejaxrl/blob/main/purejaxrl)
+- [purejaxrl](https://github.com/luchris429/purejaxrl/blob/main/purejaxrl)
 - [rainbow DQN](https://github.com/Curt-Park/rainbow-is-all-you-need/blob/master/08.rainbow.ipynb)
 
 ## function classes of increasing complexity
