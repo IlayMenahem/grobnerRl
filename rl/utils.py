@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import scipy
 import numpy as np
 
-from selector import select_action_infrecne
+from .selector import select_action_infrecne
 
 def callback_save_model(model, directory: str, filename: str) -> None:
     '''
@@ -38,7 +38,7 @@ def callback_eval(model, env, num_episodes: int) -> float:
         done = False
 
         while not done:
-            action = int(select_action_infrecne(model, obs).item())
+            action = select_action_infrecne(model, obs)
             obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             total_reward += reward

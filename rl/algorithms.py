@@ -4,9 +4,8 @@ from tqdm import tqdm
 import equinox as eqx
 import gymnasium as gym
 
-from buffers import ReplayBuffer
-from selector import select_action
-from utils import callback_eval, plot_learning_process
+from .selector import select_action
+from .utils import plot_learning_process
 
 def learner_step(replay_buffer, gamma, q_network, target_network, optimizer, optimizer_state, loss_fn):
     loss_and_grad = eqx.filter_value_and_grad(loss_fn)
@@ -19,15 +18,15 @@ def learner_step(replay_buffer, gamma, q_network, target_network, optimizer, opt
     return q_network, loss, optimizer_state, optimizer
 
 
-def train_dqn(env: gym.Env, replay_buffer: ReplayBuffer, epsilon_scheduler, target_update_freq,
-              gamma: float, q_network: eqx.Module, target_network: eqx.Module, optimizer: optax.GradientTransformation,
-              optimizer_state, num_steps: int, loss_fn, key) -> tuple[eqx.Module, list[float], list[float], list[float]]:
+def train_dqn(env, replay_buffer, epsilon_scheduler, target_update_freq, gamma: float,
+    q_network: eqx.Module, target_network: eqx.Module, optimizer: optax.GradientTransformation,
+    optimizer_state, num_steps: int, loss_fn, key) -> tuple[eqx.Module, list[float], list[float], list[float]]:
     '''
     trains a DQN agent
 
     Args:
-    - env (gym.Env): gym environment
-    - replay_buffer (ReplayBuffer): replay buffer
+    - env: an environment
+    - replay_buffer: replay buffer
     - epsilon_scheduler: epsilon decay schedule
     - target_update_freq (int): frequency of target network updates
     - gamma (float): discount factor
@@ -51,13 +50,13 @@ def train_dqn(env: gym.Env, replay_buffer: ReplayBuffer, epsilon_scheduler, targ
     progress_bar = tqdm(total=num_steps, unit="step")
     episode_score = 0.0
 
-    obs, _ = env.reset(seed=0)
+    obs, _ = env.reset()
 
     for step in range(num_steps):
         epsilon = epsilon_scheduler(step)
         epsilons.append(epsilon)
         key, subkey = jax.random.split(key)
-        action = int(select_action(q_network, obs, epsilon, subkey).item())
+        action = select_action(q_network, obs, epsilon, subkey)
 
         next_obs, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
@@ -78,9 +77,6 @@ def train_dqn(env: gym.Env, replay_buffer: ReplayBuffer, epsilon_scheduler, targ
             losses.append(loss.item())
 
         if step % target_update_freq == 0:
-            eval = callback_eval(q_network, env, 10)
-            progress_bar.set_postfix_str(f"Score: {eval:.2f}")
-            progress_bar.refresh()
             target_network = eqx.tree_at(lambda m: m, target_network, q_network)
 
     progress_bar.close()

@@ -43,7 +43,7 @@ if __name__ == "__main__":
     num_steps = 50000
     gamma = 0.99
     seed = 0
-    target_update_freq = 125
+    target_update_freq = 250
 
     capacity = 20000
     batch_size = 512

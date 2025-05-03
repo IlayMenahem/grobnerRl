@@ -353,7 +353,9 @@ class BuchbergerEnv:
                 self.G_ = self.G
                 self.lmG_ = self.lmG
 
-        return (self.G, self.P) if self.P else self.reset()
+        info = {}
+
+        return (self.G, self.P), info if self.P else self.reset()
 
     def step(self, action):
         """Perform one reduction and return the new polynomial list and pair list."""
@@ -361,9 +363,11 @@ class BuchbergerEnv:
         self.P.remove(action)
         s = spoly(self.G[i], self.G[j], lmf=self.lmG[i], lmg=self.lmG[j])
         r, stats = reduce(s, self.G_, lmF=self.lmG_)
+
         if r != 0:
             self.G, self.P = update(self.G, self.P, r.monic(), lmG=self.lmG, strategy=self.elimination)
             self.lmG.append(r.LM)
+
             if self.sort_reducers:
                 key = self.order(r.LM)
                 index = bisect.bisect(self.keysG_, key)
@@ -373,8 +377,13 @@ class BuchbergerEnv:
             else:
                 self.G_ = self.G
                 self.lmG_ = self.G_
+
+        obs = (self.G, self.P)
         reward = -(1.0 + stats['steps']) if self.rewards == 'additions' else -1.0
-        return (self.G, self.P), reward, len(self.P) == 0, {}
+        done = len(self.P) == 0
+        info = {}
+
+        return obs, reward, done, done, info
 
     def seed(self, seed=None):
         self.ideal_gen.seed(seed)

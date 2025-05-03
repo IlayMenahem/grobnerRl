@@ -186,7 +186,8 @@ class GrobnerModel(eqx.Module):
 
         # mask the values that are not in selectables
         mask = jnp.zeros_like(values)
-        mask = mask.at[jnp.array(selectables)].set(1)
+        mask = mask.at[tuple(zip(*selectables))].set(1)
+
         values = jnp.where(mask == 1, values, self.masking_value)
 
         return values
