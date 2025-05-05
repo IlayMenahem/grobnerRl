@@ -1,7 +1,7 @@
+from typing import Sequence
 import equinox as eqx
 import jax
 from jax import vmap
-from jax.tree_util import tree_map
 import jax.numpy as jnp
 from jaxtyping import Array
 from sympy.polys.rings import PolyElement
@@ -115,7 +115,7 @@ class TransformerEmbedder(eqx.Module):
         return x
 
 
-def tokenize(ideal: list[PolyElement]) -> list[Array]:
+def tokenize(ideal: Sequence[PolyElement]) -> Array:
     '''
     takes an ideal and returns a tokenized version of it, a list of arrays, each of the arrays
     representing a polynomial monomials
@@ -128,7 +128,11 @@ def tokenize(ideal: list[PolyElement]) -> list[Array]:
     '''
     monos = [jnp.array(poly.monoms()) for poly in ideal]
 
-    return monos
+    max_len = max(len(mono) for mono in monos)
+    padded_monos = [jnp.pad(mono, ((0, max_len - len(mono)), (0, 0))) for mono in monos]
+    tokenized_ideal = jnp.stack(padded_monos)
+
+    return tokenized_ideal
 
 
 class GrobnerModel(eqx.Module):
@@ -159,29 +163,25 @@ class GrobnerModel(eqx.Module):
 
         self.masking_value = masking_value
 
-    def __call__(self, obs: tuple[list[PolyElement], list[tuple[int, int]]]) -> Array:
+    def __call__(self, obs: tuple[Array, list[tuple[int, int]]]) -> Array:
         '''
         scores each pair of polynomials to select to reduce in buchberger's algorithm
 
         Args:
-        obs: tuple[list[PolyElement], list[tuple[int, int]]] - a tuple of
-        - ideal: list[PolyElement] - The ideal generators
+        obs: tuple[list[Array], list[tuple[int, int]]] - a tuple of
+        - ideal: list[Array] - The ideal generators
         - selectables: list[tuple[int, int]] - The pairs of polynomials that can be selected
 
         Returns:
         2d Array of scores for selecting a polynomial pair
         '''
-        ideal: list[PolyElement] = obs[0]
+        ideal: Array = obs[0]
         selectables: list[tuple[int, int]] = obs[1]
 
-        tokenized_ideal: list[Array] = tokenize(ideal)
+        monomial_embeddings: Array = vmap(self.monomial_model)(ideal)
+        polynomial_embeddings: Array = vmap(self.polynomial_model)(monomial_embeddings)
 
-        monomial_embeddings: list[Array] = tree_map(self.monomial_model, tokenized_ideal)
-
-        polynomial_embeddings: list[Array] = tree_map(self.polynomial_model, monomial_embeddings)
-        polynomial_arrays: Array = jnp.array(polynomial_embeddings)
-
-        polynomial_arrays = self.ideal_model(polynomial_arrays)
+        polynomial_arrays = self.ideal_model(polynomial_embeddings)
         values = jnp.matmul(polynomial_arrays, polynomial_arrays.T)
 
         # mask the values that are not in selectables

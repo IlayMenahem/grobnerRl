@@ -6,7 +6,9 @@ credit to the authors of the deepgroebner paper
 
 import bisect
 import numpy as np
+import jax.numpy as jnp
 
+from models import tokenize
 from .ideals import IdealGenerator, parse_ideal_dist
 
 
@@ -353,9 +355,11 @@ class BuchbergerEnv:
                 self.G_ = self.G
                 self.lmG_ = self.lmG
 
+        G = tokenize(self.G)
+        P = jnp.array(self.P)
         info = {}
 
-        return (self.G, self.P), info if self.P else self.reset()
+        return (G, P), info if self.P else self.reset()
 
     def step(self, action):
         """Perform one reduction and return the new polynomial list and pair list."""
@@ -378,7 +382,9 @@ class BuchbergerEnv:
                 self.G_ = self.G
                 self.lmG_ = self.G_
 
-        obs = (self.G, self.P)
+        G = tokenize(self.G)
+        P = jnp.array(self.P)
+        obs = (G, P)
         reward = -(1.0 + stats['steps']) if self.rewards == 'additions' else -1.0
         done = len(self.P) == 0
         info = {}
