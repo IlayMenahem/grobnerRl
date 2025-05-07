@@ -4,9 +4,7 @@ import equinox as eqx
 import gymnasium as gym
 import optax
 
-from buffers import ReplayBuffer
-from algorithms import train_dqn
-from losses import double_dqn_loss
+from rl.dqn import ReplayBuffer, train_dqn, dqn_loss
 
 class poll_agent(eqx.Module):
     linear1: eqx.nn.Linear
@@ -46,7 +44,7 @@ if __name__ == "__main__":
     target_update_freq = 250
 
     capacity = 20000
-    batch_size = 512
+    batch_size = 128
 
     initial_epsilon = 1.0
     transition_steps = 20000
@@ -69,6 +67,6 @@ if __name__ == "__main__":
     optimizer_state = optimizer.init(q_network)
 
     train_dqn(env, replay_buffer, epsilon_shed, target_update_freq, gamma, q_network,
-        target_network, optimizer, optimizer_state, num_steps, double_dqn_loss, key)
+        target_network, optimizer, optimizer_state, num_steps, dqn_loss, key)
 
     env.close()
