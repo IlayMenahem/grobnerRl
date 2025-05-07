@@ -5,10 +5,10 @@ credit to the authors of the deepgroebner paper
 """
 
 import bisect
-import numpy as np
 import jax.numpy as jnp
 
 from models import tokenize
+from rl.utils import GroebnerState
 from .ideals import IdealGenerator, parse_ideal_dist
 
 
@@ -357,9 +357,10 @@ class BuchbergerEnv:
 
         G = tokenize(self.G)
         P = jnp.array(self.P)
+        obs = GroebnerState(G, P)
         info = {}
 
-        return (G, P), info if self.P else self.reset()
+        return obs, info if self.P else self.reset()
 
     def step(self, action):
         """Perform one reduction and return the new polynomial list and pair list."""
@@ -384,7 +385,7 @@ class BuchbergerEnv:
 
         G = tokenize(self.G)
         P = jnp.array(self.P)
-        obs = (G, P)
+        obs = GroebnerState(G, P)
         reward = -(1.0 + stats['steps']) if self.rewards == 'additions' else -1.0
         done = len(self.P) == 0
         info = {}
@@ -409,176 +410,3 @@ class BuchbergerEnv:
             return ideal_dist
         else:
             return parse_ideal_dist(ideal_dist)
-
-
-class BuchbergerAgent:
-    """An agent that follows standard selection strategies.
-
-    Parameters
-    ----------
-    selection : {'normal', 'first', 'degree', 'random'}
-        The selection strategy used to pick pairs.
-
-    """
-
-    def __init__(self, selection='normal'):
-        self.strategy = selection
-
-    def act(self, state):
-        G, P = state
-        return select(G, P, strategy=self.strategy)
-
-
-def select(G, P, strategy='normal'):
-    """Select and return a pair from P."""
-    assert len(G) > 0, "polynomial list must be nonempty"
-    assert len(P) > 0, "pair set must be nonempty"
-    R = G[0].ring
-
-    if isinstance(strategy, str):
-        strategy = [strategy]
-
-    def strategy_key(p, s):
-        """Return a sort key for pair p in the strategy s."""
-        if s == 'first':
-            return p[1], p[0]
-        elif s == 'normal':
-            lcm = R.monomial_lcm(G[p[0]].LM, G[p[1]].LM)
-            return R.order(lcm)
-        elif s == 'degree':
-            lcm = R.monomial_lcm(G[p[0]].LM, G[p[1]].LM)
-            return sum(lcm)
-        elif s == 'random':
-            return np.random.rand()
-        else:
-            raise ValueError('unknown selection strategy')
-
-    return min(P, key=lambda p: tuple(strategy_key(p, s) for s in strategy))
-
-
-def lead_monomials_vector(f, ring, k=2, dtype=np.int32):
-    """Return the concatenated exponent vectors of the k lead monomials of f."""
-    it = iter(f.monoms())
-    return np.array([next(it, (0,) * ring.ngens) for _ in range(k)]).flatten().astype(dtype)
-
-
-class LeadMonomialsEnv:
-    """A BuchbergerEnv with state the matrix of the pairs' lead monomials.
-
-    Parameters
-    ----------
-    ideal_dist : str, optional
-        IdealGenerator or string naming the ideal distribution.
-    elimination : {'gebauermoeller', 'lcm', 'none'}, optional
-        Strategy for pair elimination.
-    rewards : {'additions', 'reductions'}, optional
-        Reward value for each step.
-    sort_input : bool, optional
-        Whether to sort the initial generating set by lead monomial.
-    sort_reducers : bool, optional
-        Whether to choose reducers in sorted order by lead monomial.
-    k : int, optional
-        Number of lead monomials shown for each polynomial.
-    dtype : data-type, optional
-        Data-type for the state matrix.
-
-    Examples
-    --------
-    >>> env = LeadMonomialsEnv()
-    >>> env.seed(123)
-    >>> env.reset()
-    array([[ 6,  4,  2,  0, 16,  3],
-           [ 6,  4,  2, 18,  0,  2],
-           [ 6,  4,  2, 11,  0,  8],
-           [18,  0,  2, 11,  0,  8],
-           [11,  0,  8,  3,  0, 17],
-           [ 6,  4,  2,  2,  4, 13],
-           [ 3,  0, 17,  2,  4, 13],
-           [ 6,  4,  2,  6,  6,  5],
-           [ 6,  4,  2,  2,  8,  6],
-           [ 0, 16,  3,  2,  8,  6],
-           [ 2,  4, 13,  2,  8,  6],
-           [ 2,  8,  6,  4, 10,  6],
-           [ 6,  4,  2,  2, 17,  0],
-           [ 0, 16,  3,  2, 17,  0]], dtype=int32)
-    >>> env.step(3)
-    (array([[ 6,  4,  2,  0, 16,  3],
-            [ 6,  4,  2, 18,  0,  2],
-            [ 6,  4,  2, 11,  0,  8],
-            [11,  0,  8,  3,  0, 17],
-            [ 6,  4,  2,  2,  4, 13],
-            [ 3,  0, 17,  2,  4, 13],
-            [ 6,  4,  2,  6,  6,  5],
-            [ 6,  4,  2,  2,  8,  6],
-            [ 0, 16,  3,  2,  8,  6],
-            [ 2,  4, 13,  2,  8,  6],
-            [ 2,  8,  6,  4, 10,  6],
-            [ 6,  4,  2,  2, 17,  0],
-            [ 0, 16,  3,  2, 17,  0],
-            [ 6,  4,  2,  4,  6, 10],
-            [ 2,  4, 13,  4,  6, 10],
-            [ 2,  8,  6,  4,  6, 10]], dtype=int32),
-     -3.0,
-     False,
-     {})
-
-    """
-
-    def __init__(self, ideal_dist='3-20-10-uniform', elimination='gebauermoeller',
-                 rewards='additions', sort_input=False, sort_reducers=True,
-                 k=1, dtype=np.int32):
-        self.env = BuchbergerEnv(ideal_dist, elimination, rewards, sort_input, sort_reducers)
-        self.ring = self.env.ideal_gen.ring
-        self.k = k
-        self.dtype = dtype
-        self.leads = []  # leads[i] = lead_monomials_vector(self.env.G[i])
-
-    def reset(self):
-        G, _ = self.env.reset()
-        self.leads = [lead_monomials_vector(g, self.ring, k=self.k, dtype=self.dtype) for g in G]
-        return self._matrix()
-
-    def step(self, action):
-        (G, P), reward, done, info = self.env.step(self.env.P[action])
-        if len(G) > len(self.leads):
-            self.leads.append(lead_monomials_vector(G[-1], self.ring, k=self.k, dtype=self.dtype))
-        return self._matrix(), reward, done, info
-
-    def seed(self, seed=None):
-        self.env.seed(seed)
-
-    def value(self, gamma=0.99):
-        return self.env.value(gamma)
-
-    def _matrix(self):
-        n = self.env.G[0].ring.ngens
-        mat = np.empty((len(self.env.P), 2 * n * self.k), dtype=self.dtype)
-        for i, p in enumerate(self.env.P):
-            mat[i, :n*self.k] = self.leads[p[0]]
-            mat[i, n*self.k:] = self.leads[p[1]]
-        return mat
-
-
-class LeadMonomialsAgent:
-    """An agent that follows standard selection strategies.
-
-    Parameters
-    ----------
-    selection : {'first', 'degree', 'random'}
-        The selection strategy used to pick pairs.
-
-    """
-
-    def __init__(self, selection='degree', k=1):
-        self.strategy = selection
-        self.k = k
-
-    def act(self, state):
-        if self.strategy == 'first':
-            return 0
-        elif self.strategy == 'degree':
-            n = state.shape[1] // (2 * self.k)
-            m = state.shape[1] // 2
-            return np.argmin(np.sum(np.maximum(state[:, :n], state[:, m:m+n]), axis=1))
-        elif self.strategy == 'random':
-            return np.random.choice(len(state))
