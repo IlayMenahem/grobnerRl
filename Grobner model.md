@@ -47,7 +47,7 @@ here are a few considerations for the model
 
 model structure
 
-1. representation of the ideal as a list[Polynomial] ,where Polynomial is list[tuple[coefficient, Monomial]], and Monomial is list[tuple[variable, exponent]]
+1. representation of the ideal as a sparse array
 2. variable embedding
 3. monomial embedding
 4. polynomial embedding
@@ -65,7 +65,7 @@ here are the methods we'll consider for training the model
 
 ### optimization
 
-the optimization algorithm will be Adam, with gradient clipping, with initial learning rate ---TBA---, and batch size between 256 and 16384; we won't use a learning rate scheduler.
+the optimization algorithm will be Adam, with gradient clipping, learning rate scheduler, and batch size between 256 and 16384.
 
 ### callbacks
 
