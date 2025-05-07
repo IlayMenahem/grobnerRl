@@ -6,7 +6,7 @@ from models import GrobnerModel
 
 from rl.buffers import ReplayBuffer
 from rl.algorithms import train_dqn
-from rl.losses import double_dqn_loss
+from rl.losses import dqn_loss
 
 if __name__ == "__main__":
 
@@ -16,7 +16,7 @@ if __name__ == "__main__":
     target_update_freq = 125
 
     capacity = 20000
-    batch_size = 512
+    batch_size = 16
 
     initial_epsilon = 1.0
     transition_steps = 20000
@@ -28,7 +28,7 @@ if __name__ == "__main__":
     key, subkey1, subkey2 = jax.random.split(key, 3)
     q_network = GrobnerModel(128, 16, 32, 2, 2, 2, 2, -jnp.inf, subkey1)
     target_network = GrobnerModel(128, 16, 32, 2, 2, 2, 2, -jnp.inf, subkey2)
-    env = BuchbergerEnv('3-5-5-uniform')
+    env = BuchbergerEnv('2-3-3-uniform')
 
     replay_buffer = ReplayBuffer(capacity, batch_size)
 
@@ -39,4 +39,4 @@ if __name__ == "__main__":
     optimizer_state = optimizer.init(q_network)
 
     train_dqn(env, replay_buffer, epsilon_shed, target_update_freq, gamma, q_network,
-        target_network, optimizer, optimizer_state, num_steps, double_dqn_loss, key)
+        target_network, optimizer, optimizer_state, num_steps, dqn_loss, key)

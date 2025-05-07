@@ -7,11 +7,10 @@ import gymnasium as gym
 from .selector import select_action
 from .utils import plot_learning_process
 
-def learner_step(replay_buffer, gamma, q_network, target_network, optimizer, optimizer_state, loss_fn):
-    loss_and_grad = eqx.filter_value_and_grad(loss_fn)
 
+def learner_step(replay_buffer, gamma, q_network, target_network, optimizer, optimizer_state, loss_fn):
     batch = replay_buffer.sample_batch()
-    loss, grads = loss_and_grad(q_network, target_network, gamma, batch)
+    loss, grads = eqx.filter_value_and_grad(loss_fn)(q_network, target_network, gamma, batch)
     updates, optimizer_state = optimizer.update(grads, optimizer_state, q_network)
     q_network = eqx.apply_updates(q_network, updates)
 
@@ -20,7 +19,7 @@ def learner_step(replay_buffer, gamma, q_network, target_network, optimizer, opt
 
 def train_dqn(env, replay_buffer, epsilon_scheduler, target_update_freq, gamma: float,
     q_network: eqx.Module, target_network: eqx.Module, optimizer: optax.GradientTransformation,
-    optimizer_state, num_steps: int, loss_fn, key) -> tuple[eqx.Module, list[float], list[float], list[float]]:
+    optimizer_state, num_steps: int, loss_fn, key) -> eqx.Module:
     '''
     trains a DQN agent
 
@@ -38,11 +37,7 @@ def train_dqn(env, replay_buffer, epsilon_scheduler, target_update_freq, gamma: 
     - loss_fn: loss function
     - key: JAX random key
 
-    Returns:
-    - q_network (eqx.Module): trained Q-network
-    - scores (list[float]): list of episode scores
-    - losses (list[float]): list of losses
-    - epsilons (list[float]): list of epsilon values
+    Returns: q_network (eqx.Module): trained Q-network
     '''
     scores = []
     losses = []
@@ -82,11 +77,12 @@ def train_dqn(env, replay_buffer, epsilon_scheduler, target_update_freq, gamma: 
     progress_bar.close()
     plot_learning_process(scores, losses, epsilons)
 
-    return q_network, scores, losses, epsilons
+    return q_network
 
 
 def train_ppo(env: gym.Env, policy: eqx.Module, critic: eqx.Module):
     raise NotImplementedError
 
-def train_a3c(env: gym.Env, policy: eqx.Module, critic: eqx.Module, gamma: float, n_steps: int):
+
+def train_a2c(env: gym.Env, policy: eqx.Module, critic: eqx.Module, gamma: float, n_steps: int):
     raise NotImplementedError

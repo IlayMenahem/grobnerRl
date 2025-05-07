@@ -3,8 +3,17 @@ import equinox as eqx
 import matplotlib.pyplot as plt
 import scipy
 import numpy as np
+from dataclasses import dataclass
+from chex import Array
 
 from .selector import select_action_infrecne
+
+
+@dataclass(frozen=True)
+class GroebnerState:
+    ideal: Array
+    selectables: Array
+
 
 def callback_save_model(model, directory: str, filename: str) -> None:
     '''

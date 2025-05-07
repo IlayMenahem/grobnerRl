@@ -6,6 +6,8 @@ import jax.numpy as jnp
 from jaxtyping import Array
 from sympy.polys.rings import PolyElement
 
+from rl.utils import GroebnerState
+
 
 class EmbeddingMonomials(eqx.Module):
     embedding: eqx.nn.Embedding
@@ -163,20 +165,20 @@ class GrobnerModel(eqx.Module):
 
         self.masking_value = masking_value
 
-    def __call__(self, obs: tuple[Array, list[tuple[int, int]]]) -> Array:
+    def __call__(self, obs: GroebnerState) -> Array:
         '''
         scores each pair of polynomials to select to reduce in buchberger's algorithm
 
         Args:
-        obs: tuple[list[Array], list[tuple[int, int]]] - a tuple of
-        - ideal: list[Array] - The ideal generators
-        - selectables: list[tuple[int, int]] - The pairs of polynomials that can be selected
+        obs: GroebnerState
+        - ideal: Array - The ideal generators
+        - selectables: Array - The pairs of polynomials that can be selected
 
         Returns:
         2d Array of scores for selecting a polynomial pair
         '''
-        ideal: Array = obs[0]
-        selectables: list[tuple[int, int]] = obs[1]
+        ideal: Array = obs.ideal
+        selectables: Array = obs.selectables
 
         monomial_embeddings: Array = vmap(self.monomial_model)(ideal)
         polynomial_embeddings: Array = vmap(self.polynomial_model)(monomial_embeddings)
