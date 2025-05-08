@@ -1,18 +1,45 @@
 import os
 import equinox as eqx
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import scipy
 import numpy as np
 from dataclasses import dataclass
 from chex import Array
 
-from .selector import select_action_infrecne
+
+def select_action_infrecne(dqn: eqx.Module, obs: Array) -> tuple[int, ...]:
+    '''
+    selects an action using the DQN model
+
+    Args:
+    - dqn (eqx.Module): the DQN model
+    - obs (Array): current observation
+
+    returns:
+    - action (tuple[int, ...]): selected action
+    '''
+    q_vals = eqx.nn.inference_mode(dqn)(obs)
+    chosen_action = jnp.array(jnp.unravel_index(jnp.argmax(q_vals), q_vals.shape))
+
+    chosen_action = tuple(i.item() for i in chosen_action)
+
+    return chosen_action
 
 
 @dataclass(frozen=True)
 class GroebnerState:
     ideal: Array
     selectables: Array
+
+
+@dataclass(frozen=True)
+class TimeStep:
+    obs: GroebnerState
+    action: tuple[int, ...] | int
+    reward: float
+    next_obs: GroebnerState
+    done: bool
 
 
 def callback_save_model(model, directory: str, filename: str) -> None:
@@ -55,6 +82,7 @@ def callback_eval(model, env, num_episodes: int) -> float:
     mean_reward = total_reward / num_episodes
 
     return mean_reward
+
 
 def plot_learning_process(scores: list[float], losses: list[float], epsilons: list[float]) -> None:
     '''
