@@ -1,7 +1,7 @@
 jax
+chex
 equinox
 optax
-distrax
 gymnasium
 tqdm
 numpy

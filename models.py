@@ -128,10 +128,10 @@ def tokenize(ideal: Sequence[PolyElement]) -> Array:
     Returns:
     tokenized ideal
     '''
-    monos = [jnp.array(poly.monoms()) for poly in ideal]
+    polys_monomials = [jnp.array(poly.monoms()) for poly in ideal]
 
-    max_len = max(len(mono) for mono in monos)
-    padded_monos = [jnp.pad(mono, ((0, max_len - len(mono)), (0, 0))) for mono in monos]
+    max_len = max(len(mono) for mono in polys_monomials)
+    padded_monos = [jnp.pad(mono, ((0, max_len - len(mono)), (0, 0))) for mono in polys_monomials]
     tokenized_ideal = jnp.stack(padded_monos)
 
     return tokenized_ideal

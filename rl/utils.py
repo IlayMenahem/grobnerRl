@@ -1,5 +1,9 @@
 import os
 import equinox as eqx
+import optax
+import gymnasium as gym
+import jax
+from jax import value_and_grad, jit
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import scipy
@@ -8,7 +12,7 @@ from dataclasses import dataclass
 from chex import Array
 
 
-def select_action_infrecne(dqn: eqx.Module, obs: Array) -> tuple[int, ...]:
+def select_action_inference(dqn: eqx.Module, obs: Array) -> tuple[int, ...]:
     '''
     selects an action using the DQN model
 
@@ -25,6 +29,15 @@ def select_action_infrecne(dqn: eqx.Module, obs: Array) -> tuple[int, ...]:
     chosen_action = tuple(i.item() for i in chosen_action)
 
     return chosen_action
+
+
+def update_network(network: eqx.Module, optimizer: optax.GradientTransformation, optimizer_state: optax.OptState,
+    loss_fn: callable, *loss_args) -> tuple[eqx.Module, float, optax.OptState]:
+    loss, grads = value_and_grad(loss_fn)(network, *loss_args)
+    updates, optimizer_state = optimizer.update(grads, optimizer_state)
+    network = optax.apply_updates(network, updates)
+    
+    return network, loss, optimizer_state
 
 
 @dataclass(frozen=True)
@@ -74,7 +87,7 @@ def callback_eval(model, env, num_episodes: int) -> float:
         done = False
 
         while not done:
-            action = select_action_infrecne(model, obs)
+            action = select_action_inference(model, obs)
             obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             total_reward += reward
@@ -123,3 +136,48 @@ def plot_learning_process(scores: list[float], losses: list[float], epsilons: li
     plt.grid(True)
     plt.tight_layout()
     plt.show()
+
+
+
+
+class poll_agent(eqx.Module):
+    linear1: eqx.nn.Linear
+    linear2: eqx.nn.Linear
+    linear3: eqx.nn.Linear
+    linear4: eqx.nn.Linear
+    state_value: eqx.nn.Linear
+    advantage: eqx.nn.Linear
+
+    def __init__(self, input_size: int, output_size: int, key):
+        key1, key2, key3, key4, key5, key6 = jax.random.split(key, 6)
+
+        self.linear1 = eqx.nn.Linear(input_size, 32, key=key1)
+        self.linear2 = eqx.nn.Linear(32, 32, key=key2)
+        self.linear3 = eqx.nn.Linear(32, 32, key=key3)
+        self.linear4 = eqx.nn.Linear(32, 32, key=key4)
+        self.state_value = eqx.nn.Linear(32, 1, key=key5)
+        self.advantage = eqx.nn.Linear(32, output_size, key=key6)
+
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        x = jax.nn.relu(self.linear1(x))
+        x = jax.nn.relu(self.linear2(x))
+
+        state_value = self.state_value(x)
+        advantage = self.advantage(x)
+
+        q_values = state_value + (advantage - jnp.mean(advantage, axis=-1, keepdims=True))
+
+        return q_values
+
+
+class poll_policy(eqx.Module):
+    poll_value: poll_agent
+
+    def __init__(self, input_size: int, output_size: int, key):
+        self.poll_value = poll_agent(input_size, output_size, key)
+    
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        vals = self.poll_value(x)
+        probs = jax.nn.softmax(vals)
+
+        return probs

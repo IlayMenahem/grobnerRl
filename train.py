@@ -4,9 +4,7 @@ import optax
 from envs.deepgroebner import BuchbergerEnv
 from models import GrobnerModel
 
-from rl.buffers import ReplayBuffer
-from rl.algorithms import train_dqn
-from rl.losses import dqn_loss
+from rl.dqn import ReplayBuffer, train_dqn, dqn_loss
 
 if __name__ == "__main__":
 

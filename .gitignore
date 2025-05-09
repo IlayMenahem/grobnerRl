@@ -3,3 +3,5 @@ __pycache__
 .ropeproject
 .venv
 temp.py
+.obsidian
+.gitignore
