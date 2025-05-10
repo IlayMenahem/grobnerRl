@@ -3,6 +3,8 @@
 import itertools as it
 import numpy as np
 import sympy as sp
+import scipy.stats
+import sympy
 
 
 def cyclic(n, coefficient_ring=sp.FF(32003), order='grevlex'):
@@ -321,3 +323,47 @@ class RandomIdealGenerator(IdealGenerator):
 
     def seed(self, seed=None):
         self.rng = np.random.default_rng(seed)
+
+
+
+def random_polynomial(max_num_monoms, max_degree, vars, R):
+    poly = R.zero
+
+    num_monoms = scipy.stats.randint.rvs(1, max_num_monoms)
+    for _ in range(num_monoms):
+        d = scipy.stats.randint.rvs(1, max_degree)
+
+        exps = uniform_random_vector(vars, d)
+
+        mon = R.one
+        for var, exponent in zip(vars, exps):
+            mon *= var**exponent
+
+        coeff = scipy.stats.poisson.rvs(1) + 1
+        poly += coeff * mon
+
+    return poly
+
+def uniform_random_vector(vars, d):
+    exps = []
+    num_v = len(vars)
+    current_monomial_degree = scipy.stats.randint.rvs(1, d+1)
+    cuts = sorted(scipy.stats.randint.rvs(1, current_monomial_degree + num_v, size=num_v - 1))
+
+    prev_cut = 0
+    for i in range(num_v - 1):
+        exp = cuts[i] - prev_cut - 1
+        if exp < 0:
+            exp = 0
+        exps.append(exp)
+        prev_cut = cuts[i]
+    exps.append((current_monomial_degree + num_v - 1) - prev_cut)
+
+    return exps
+
+def random_ideal(num_polys, max_num_monoms, max_degree, num_vars, field, order):
+    R, vars = sympy.xring([f'x{i}' for i in range(num_vars)], field, order)
+    ideal = [random_polynomial(max_num_monoms, max_degree, vars, R) for _ in range(num_polys)]
+
+    return ideal
+
