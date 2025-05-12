@@ -1,4 +1,4 @@
-from envs.deepgroebner import BuchbergerEnv
+from grobnerRl.envs.deepgroebner import BuchbergerEnv
 
 def display_obs(obs):
     ideal, selectables = obs
@@ -11,14 +11,14 @@ def display_obs(obs):
         print(f"{poly}")
 
 
-if __name__ == '__main__':
-    env = BuchbergerEnv('2-3-5-uniform', mode='game')
+def play_buchberger_game(ideal_params):
+    env = BuchbergerEnv(ideal_params, mode='game')
     done = False
     obs, _ = env.reset()
 
     while not done:
         display_obs(obs)
-        action = tuple(map(int, input("Enter your action as comma-separated integers: ").split(',')))
+        action = tuple(map(int, input("Enter your action as space-separated integers: ").split(' ')))
         obs, reward, done, _, _ = env.step(action)
         print(f'reward: {reward}, done: {done}')
 

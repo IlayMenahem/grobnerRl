@@ -1,9 +1,7 @@
 import os
 import equinox as eqx
 import optax
-import gymnasium as gym
-import jax
-from jax import value_and_grad, jit
+from jax import value_and_grad
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import scipy
@@ -136,48 +134,4 @@ def plot_learning_process(scores: list[float], losses: list[float], epsilons: li
     plt.grid(True)
     plt.tight_layout()
     plt.show()
-
-
-
-
-class poll_agent(eqx.Module):
-    linear1: eqx.nn.Linear
-    linear2: eqx.nn.Linear
-    linear3: eqx.nn.Linear
-    linear4: eqx.nn.Linear
-    state_value: eqx.nn.Linear
-    advantage: eqx.nn.Linear
-
-    def __init__(self, input_size: int, output_size: int, key):
-        key1, key2, key3, key4, key5, key6 = jax.random.split(key, 6)
-
-        self.linear1 = eqx.nn.Linear(input_size, 32, key=key1)
-        self.linear2 = eqx.nn.Linear(32, 32, key=key2)
-        self.linear3 = eqx.nn.Linear(32, 32, key=key3)
-        self.linear4 = eqx.nn.Linear(32, 32, key=key4)
-        self.state_value = eqx.nn.Linear(32, 1, key=key5)
-        self.advantage = eqx.nn.Linear(32, output_size, key=key6)
-
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        x = jax.nn.relu(self.linear1(x))
-        x = jax.nn.relu(self.linear2(x))
-
-        state_value = self.state_value(x)
-        advantage = self.advantage(x)
-
-        q_values = state_value + (advantage - jnp.mean(advantage, axis=-1, keepdims=True))
-
-        return q_values
-
-
-class poll_policy(eqx.Module):
-    poll_value: poll_agent
-
-    def __init__(self, input_size: int, output_size: int, key):
-        self.poll_value = poll_agent(input_size, output_size, key)
     
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        vals = self.poll_value(x)
-        probs = jax.nn.softmax(vals)
-
-        return probs

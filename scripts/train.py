@@ -1,10 +1,10 @@
 import jax
 import jax.numpy as jnp
 import optax
-from envs.deepgroebner import BuchbergerEnv
-from models import GrobnerModel
 
-from rl.dqn import ReplayBuffer, train_dqn, dqn_loss
+from grobnerRl.envs.deepgroebner import BuchbergerEnv
+from grobnerRl.models import GrobnerModel
+from grobnerRl.rl.dqn import ReplayBuffer, train_dqn, dqn_loss
 
 if __name__ == "__main__":
 

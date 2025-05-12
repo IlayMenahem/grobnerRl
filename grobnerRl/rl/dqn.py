@@ -9,9 +9,8 @@ import optax
 from tqdm import tqdm
 import equinox as eqx
 from chex import Array
-import gymnasium as gym
 
-from .utils import TimeStep, GroebnerState, plot_learning_process, poll_agent
+from grobnerRl.rl.utils import TimeStep, GroebnerState, plot_learning_process
 
 
 
@@ -208,39 +207,3 @@ def train_dqn(env, replay_buffer: ReplayBuffer, epsilon_scheduler: callable,
     plot_learning_process(scores, losses, epsilons)
 
     return q_network
-
-
-if __name__ == "__main__":
-    num_steps = 50000
-    gamma = 0.99
-    seed = 0
-    target_update_freq = 250
-
-    capacity = 20000
-    batch_size = 512
-
-    initial_epsilon = 1.0
-    transition_steps = 20000
-    final_epsilon = 0.1
-    learning_rate = 4e-5
-    max_norm = 0.25
-
-    key = jax.random.key(seed)
-    key, subkey1, subkey2 = jax.random.split(key, 3)
-    q_network = poll_agent(6, 3, subkey1)
-    target_network = poll_agent(6, 3, subkey2)
-    env = gym.make('Acrobot-v1', max_episode_steps=250)
-
-    replay_buffer = ReplayBuffer(capacity, batch_size)
-
-    epsilon_shed = optax.schedules.linear_schedule(initial_epsilon, final_epsilon,
-        transition_steps, batch_size)
-
-    optimizer = optax.chain(optax.clip_by_global_norm(max_norm), optax.adam(learning_rate))
-    optimizer_state = optimizer.init(q_network)
-
-    train_dqn(env, replay_buffer, epsilon_shed, target_update_freq, gamma, q_network,
-        target_network, optimizer, optimizer_state, num_steps, dqn_loss, key)
-
-    env.close()
-

@@ -8,9 +8,9 @@ import bisect
 import jax.numpy as jnp
 import numpy as np
 
-from models import tokenize
-from rl.utils import GroebnerState
-from .ideals import IdealGenerator, parse_ideal_dist
+from grobnerRl.models import tokenize
+from grobnerRl.rl.utils import GroebnerState
+from grobnerRl.envs.ideals import IdealGenerator, parse_ideal_dist
 
 
 def spoly(f, g, lmf=None, lmg=None):
@@ -173,8 +173,12 @@ def interreduce(G):
 
 def select(G, P, strategy='normal'):
     """Select and return a pair from P."""
-    assert len(G) > 0, "polynomial list must be nonempty"
-    assert len(P) > 0, "pair set must be nonempty"
+    if not len(G) > 0:
+        raise ValueError('polynomial list must be nonempty')
+    
+    if not len(P) > 0:
+        raise ValueError('pair set must be nonempty')
+
     R = G[0].ring
 
     if isinstance(strategy, str):
@@ -386,7 +390,7 @@ class BuchbergerEnv:
 
     """
 
-    def __init__(self, mode='jax', ideal_dist='3-20-10-uniform', elimination='gebauermoeller',
+    def __init__(self, ideal_dist='3-20-10-uniform', mode='game', elimination='gebauermoeller',
                  rewards='additions', sort_input=False, sort_reducers=True):
         self.mode = mode
         self.ideal_gen = self._make_ideal_gen(ideal_dist)

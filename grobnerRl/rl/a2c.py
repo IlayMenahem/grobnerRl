@@ -6,9 +6,8 @@ import optax
 from tqdm import tqdm
 import equinox as eqx
 from chex import Array
-import gymnasium as gym
 
-from .utils import TimeStep, GroebnerState, update_network, poll_agent, poll_policy
+from grobnerRl.rl.utils import TimeStep, GroebnerState, update_network
 
 
 class TransitionSet:
@@ -122,28 +121,3 @@ def train_a2c(env, replay_buffer: TransitionSet, policy: eqx.Module, critic: eqx
     progress_bar.close()
 
     return policy, critic, scores, losses
-
-
-if __name__ == "__main__":
-    num_episodes = 1000
-    n_steps = 256
-    gamma = 0.9
-    seed = 0
-    key = jax.random.key(seed)
-
-    env = gym.make('Acrobot-v1', max_episode_steps=250)
-    replay_buffer = TransitionSet(n_steps)
-    policy = poll_policy(6, 3, key)
-    critic = poll_agent(6, 1, key)
-
-    optimizer_policy = optax.adam(1e-4)
-    optimizer_policy_state = optimizer_policy.init(policy)
-    optimizer_critic = optax.adam(1e-3)
-    optimizer_critic_state = optimizer_critic.init(critic)
-
-    policy, critic, scores, losses = train_a2c(env, replay_buffer, policy, critic, 
-        optimizer_policy, optimizer_policy_state, optimizer_critic, optimizer_critic_state, 
-        gamma, num_episodes, n_steps, key)
-    
-    env.close()
-    print(scores)

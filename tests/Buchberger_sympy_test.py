@@ -5,7 +5,7 @@ from sympy.polys.orderings import lex, grlex
 from sympy.polys.rings import ring, xring
 from sympy.polys.domains import ZZ, QQ
 
-from BuchbergerSympy import groebner as Buchberger
+from grobnerRl.Buchberger.BuchbergerSympy import groebner as Buchberger
 
 class TestBuchberger:
     def test_Buchberger_case1(self):
@@ -137,20 +137,20 @@ def test_empty():
 
 def test_benchmark_katsura_3():
     R, x0,x1,x2 = ring("x:3", ZZ, lex)
-    I = [x0 + 2*x1 + 2*x2 - 1,
+    ideal = [x0 + 2*x1 + 2*x2 - 1,
          x0**2 + 2*x1**2 + 2*x2**2 - x0,
          2*x0*x1 + 2*x1*x2 - x1]
 
-    assert Buchberger(I, R) == [
+    assert Buchberger(ideal, R) == [
         -7 + 7*x0 + 8*x2 + 158*x2**2 - 420*x2**3,
         7*x1 + 3*x2 - 79*x2**2 + 210*x2**3,
         x2 + x2**2 - 40*x2**3 + 84*x2**4,
     ]
 
     R, x0,x1,x2 = ring("x:3", ZZ, grlex)
-    I = [ i.set_ring(R) for i in I ]
+    ideal = [ i.set_ring(R) for i in ideal ]
 
-    assert Buchberger(I, R) == [
+    assert Buchberger(ideal, R) == [
         7*x1 + 3*x2 - 79*x2**2 + 210*x2**3,
         -x1 + x2 - 3*x2**2 + 5*x1**2,
         -x1 - 4*x2 + 10*x1*x2 + 12*x2**2,
@@ -159,12 +159,12 @@ def test_benchmark_katsura_3():
 
 def test_benchmark_katsura_4():
     R, x0,x1,x2,x3 = ring("x:4", ZZ, lex)
-    I = [x0 + 2*x1 + 2*x2 + 2*x3 - 1,
+    ideal = [x0 + 2*x1 + 2*x2 + 2*x3 - 1,
          x0**2 + 2*x1**2 + 2*x2**2 + 2*x3**2 - x0,
          2*x0*x1 + 2*x1*x2 + 2*x2*x3 - x1,
          x1**2 + 2*x0*x2 + 2*x1*x3 - x2]
 
-    assert Buchberger(I, R) == [
+    assert Buchberger(ideal, R) == [
         5913075*x0 - 159690237696*x3**7 + 31246269696*x3**6 + 27439610544*x3**5 - 6475723368*x3**4 - 838935856*x3**3 + 275119624*x3**2 + 4884038*x3 - 5913075,
         1971025*x1 - 97197721632*x3**7 + 73975630752*x3**6 - 12121915032*x3**5 - 2760941496*x3**4 + 814792828*x3**3 - 1678512*x3**2 - 9158924*x3,
         5913075*x2 + 371438283744*x3**7 - 237550027104*x3**6 + 22645939824*x3**5 + 11520686172*x3**4 - 2024910556*x3**3 - 132524276*x3**2 + 30947828*x3,
@@ -173,9 +173,9 @@ def test_benchmark_katsura_4():
     ]
 
     R, x0,x1,x2,x3 = ring("x:4", ZZ, grlex)
-    I = [ i.set_ring(R) for i in I ]
+    ideal = [ i.set_ring(R) for i in ideal ]
 
-    assert Buchberger(I, R) == [
+    assert Buchberger(ideal, R) == [
         393*x1 - 4662*x2**2 + 4462*x2*x3 - 59*x2 + 224532*x3**4 - 91224*x3**3 - 678*x3**2 + 2046*x3,
         -x1 + 196*x2**3 - 21*x2**2 + 60*x2*x3 - 18*x2 - 168*x3**3 + 83*x3**2 - 9*x3,
         -6*x1 + 1134*x2**2*x3 - 189*x2**2 - 466*x2*x3 + 32*x2 - 630*x3**3 + 57*x3**2 + 51*x3,
@@ -188,10 +188,10 @@ def test_benchmark_katsura_4():
 
 def test_benchmark_czichowski():
     R, x,t = ring("x,t", ZZ, lex)
-    I = [9*x**8 + 36*x**7 - 32*x**6 - 252*x**5 - 78*x**4 + 468*x**3 + 288*x**2 - 108*x + 9,
+    ideal = [9*x**8 + 36*x**7 - 32*x**6 - 252*x**5 - 78*x**4 + 468*x**3 + 288*x**2 - 108*x + 9,
          (-72 - 72*t)*x**7 + (-256 - 252*t)*x**6 + (192 + 192*t)*x**5 + (1280 + 1260*t)*x**4 + (312 + 312*t)*x**3 + (-404*t)*x**2 + (-576 - 576*t)*x + 96 + 108*t]
 
-    assert Buchberger(I, R) == [
+    assert Buchberger(ideal, R) == [
         3725588592068034903797967297424801242396746870413359539263038139343329273586196480000*x -
         160420835591776763325581422211936558925462474417709511019228211783493866564923546661604487873*t**7 -
         1406108495478033395547109582678806497509499966197028487131115097902188374051595011248311352864*t**6 -
@@ -213,9 +213,9 @@ def test_benchmark_czichowski():
     ]
 
     R, x,t = ring("x,t", ZZ, grlex)
-    I = [ i.set_ring(R) for i in I ]
+    ideal = [ i.set_ring(R) for i in ideal ]
 
-    assert Buchberger(I, R) == [
+    assert Buchberger(ideal, R) == [
         16996618586000601590732959134095643086442*t**3*x -
         32936701459297092865176560282688198064839*t**3 +
         78592411049800639484139414821529525782364*t**2*x -
@@ -257,12 +257,12 @@ def test_benchmark_czichowski():
 def test_benchmark_cyclic_4():
     R, a,b,c,d = ring("a,b,c,d", ZZ, lex)
 
-    I = [a + b + c + d,
+    ideal = [a + b + c + d,
          a*b + a*d + b*c + b*d,
          a*b*c + a*b*d + a*c*d + b*c*d,
          a*b*c*d - 1]
 
-    assert Buchberger(I, R) == [
+    assert Buchberger(ideal, R) == [
         4*a + 3*d**9 - 4*d**5 - 3*d,
         4*b + 4*c - 3*d**9 + 4*d**5 + 7*d,
         4*c**2 + 3*d**10 - 4*d**6 - 3*d**2,
@@ -270,9 +270,9 @@ def test_benchmark_cyclic_4():
     ]
 
     R, a,b,c,d = ring("a,b,c,d", ZZ, grlex)
-    I = [ i.set_ring(R) for i in I ]
+    ideal = [ i.set_ring(R) for i in ideal ]
 
-    assert Buchberger(I, R) == [
+    assert Buchberger(ideal, R) == [
         3*b*c - c**2 + d**6 - 3*d**2,
         -b + 3*c**2*d**3 - c - d**5 - 4*d,
         -b + 3*c*d**4 + 2*c + 2*d**5 + 2*d,
@@ -297,9 +297,9 @@ def test_benchmark_coloring():
     I3 = [x**3 - 1 for x in V]
     Ig = [x**2 + x*y + y**2 for x, y in E]
 
-    I = I3 + Ig
+    ideal = I3 + Ig
 
-    assert Buchberger(I[:-1], R) == [
+    assert Buchberger(ideal[:-1], R) == [
         x1 + x11 + x12,
         x2 - x11,
         x3 - x12,
@@ -314,7 +314,7 @@ def test_benchmark_coloring():
         x12**3 - 1,
     ]
 
-    assert Buchberger(I, R) == [1]
+    assert Buchberger(ideal, R) == [1]
 
 def test_benchmark_minpoly():
     R, x,y,z = ring("x,y,z", QQ, lex)

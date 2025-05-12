@@ -1,8 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from sympy.polys.domains import ZZ
-from envs.ideals import random_ideal
-from envs.deepgroebner import buchberger
+from grobnerRl.envs.ideals import random_ideal
+from grobnerRl.envs.deepgroebner import buchberger
 
 def display_obs(obs):
     ideal, _ = obs
@@ -45,11 +44,3 @@ def plot_pdf(step_counts, strategy):
     plt.grid()
     plt.savefig(f'{strategy}.png')
     plt.close()
-
-
-if __name__ == '__main__':
-    num_episodes = 1000
-    step_limit = 500
-    ideal_params = [5, 7, 15, 3, ZZ, 'grevlex']
-
-    benchmark_agent('degree_after_reduce', num_episodes, step_limit, *ideal_params)

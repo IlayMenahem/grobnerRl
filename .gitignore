@@ -5,3 +5,7 @@ __pycache__
 temp.py
 .obsidian
 .gitignore
+.vscode
+.ruff_cache
+grobnerRl.egg-info
+build

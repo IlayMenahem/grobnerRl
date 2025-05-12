@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from jaxtyping import Array
 from sympy.polys.rings import PolyElement
 
-from rl.utils import GroebnerState
+from grobnerRl.rl.utils import GroebnerState
 
 
 class EmbeddingMonomials(eqx.Module):
