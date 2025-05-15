@@ -175,7 +175,7 @@ def select(G, P, strategy='normal'):
     """Select and return a pair from P."""
     if not len(G) > 0:
         raise ValueError('polynomial list must be nonempty')
-    
+
     if not len(P) > 0:
         raise ValueError('pair set must be nonempty')
 
@@ -287,7 +287,7 @@ def buchberger(F, S=None, elimination='gebauermoeller', selection='normal', step
             stats['nonzero_reductions'] += 1
         else:
             stats['zero_reductions'] += 1
-    
+
     stats['valid'] = True
 
     return interreduce(minimalize(G)), stats
@@ -392,6 +392,9 @@ class BuchbergerEnv:
 
     def __init__(self, ideal_dist='3-20-10-uniform', mode='game', elimination='gebauermoeller',
                  rewards='additions', sort_input=False, sort_reducers=True):
+        if mode not in ['jax', 'game']:
+            raise ValueError('mode must be either jax or game')
+
         self.mode = mode
         self.ideal_gen = self._make_ideal_gen(ideal_dist)
         self.elimination = elimination
@@ -423,10 +426,9 @@ class BuchbergerEnv:
                 self.G_ = self.G
                 self.lmG_ = self.lmG
 
+        obs = (self.G, self.P)
         if self.mode == 'jax':
-            obs = make_obs(self.G, self.P)
-        elif self.mode == 'game':
-            obs = (self.G, self.P)
+            obs = make_obs(*obs)
 
         info = {}
 
@@ -453,10 +455,9 @@ class BuchbergerEnv:
                 self.G_ = self.G
                 self.lmG_ = self.G_
 
+        obs = (self.G, self.P)
         if self.mode == 'jax':
-            obs = make_obs(self.G, self.P)
-        elif self.mode == 'game':
-            obs = (self.G, self.P)
+            obs = make_obs(*obs)
 
         reward = -(1.0 + stats['steps']) if self.rewards == 'additions' else -1.0
         done = len(self.P) == 0

@@ -1,64 +1,45 @@
-import copy
-from itertools import combinations
-from sympy.polys.rings import PolyElement, ring
+from sympy.polys.rings import ring, PolyElement
 from sympy.polys.domains import RR
 from sympy.polys.orderings import lex
 from sympy.polys.polyerrors import DomainError
 from sympy.polys.monomials import monomial_mul, monomial_lcm, monomial_divides, term_div
 from sympy.polys.groebnertools import spoly, red_groebner, is_groebner, is_minimal, is_reduced
+from grobnerRl.envs.deepgroebner import reduce, update, interreduce, minimalize, select
 
-def reduced(poly: PolyElement, ideal: list[PolyElement], ring):
-    '''
-    Reduce a polynomial modulo an ideal using the reduced form.
+def buchberger(ideal: list[PolyElement]):
+    pairs, basis = init(ideal)
 
-    Parameters:
-    - poly: The polynomial to be reduced.
-    - ideal: The ideal to reduce `poly` modulo.
-    - ring: The ring in which the reduction is performed.
+    while pairs:
+        selection = select(basis, pairs)
+        basis, pairs = step(basis, pairs, selection)
 
-    Returns:
-    - The reduced polynomial.
-    '''
-    if not poly or not ideal:
-        return poly
+    basis = interreduce(minimalize(basis))
 
-    changed = True
+    return basis
 
-    while changed:
-        changed = False
 
-        for g in ideal:
-            reminder = poly.rem(g)
+def step(basis: list[PolyElement], pairs: list[tuple[int, int]], selection: tuple[int, int]) -> tuple[list[PolyElement], list[tuple[int, int]]]:
+    from grobnerRl.envs.deepgroebner import spoly
+    i, j = selection
+    pairs.remove((i, j))
+    s = spoly(basis[i], basis[j])
+    r, _ = reduce(s, basis)
 
-            if reminder != poly:
-                poly = reminder
-                changed = True
+    if r != 0:
+        basis, pairs = update(basis, pairs, r.monic())
 
-    return poly
+    return basis, pairs
 
-def sorted_basis(basis, order):
-    return sorted(basis, key=lambda x: order(x.LM))
 
-def buchberger(ideal, ring):
-    raise NotImplementedError("Buchberger algorithm is implemented incorrectly")
-    grobner_basis = copy.copy(ideal)
-    changed = True
+def init(ideal: list[PolyElement]) -> tuple[list[tuple[int, int]], list[PolyElement]]:
+    basis = []
+    pairs = []
 
-    while changed:
-        changed = False
+    for f in ideal:
+        basis, pairs = update(basis, pairs, f.monic())
 
-        for p, q in combinations(grobner_basis, 2):
-            s = spoly(p, q, ring)
-            h = reduced(s, grobner_basis, ring)
+    return pairs, basis
 
-            if h != 0:
-                changed = True
-                grobner_basis.append(h)
-
-    grobner_basis = sorted_basis(grobner_basis, ring.order)
-    grobner_basis = red_groebner(grobner_basis, ring)
-
-    return grobner_basis
 
 def _buchberger(f, ring):
     """
