@@ -11,14 +11,14 @@ def buchberger(ideal: list[PolyElement]):
 
     while pairs:
         selection = select(basis, pairs)
-        basis, pairs = step(basis, pairs, selection)
+        basis, pairs = buchberger_step(basis, pairs, selection)
 
     basis = interreduce(minimalize(basis))
 
     return basis
 
 
-def step(basis: list[PolyElement], pairs: list[tuple[int, int]], selection: tuple[int, int]) -> tuple[list[PolyElement], list[tuple[int, int]]]:
+def buchberger_step(basis: list[PolyElement], pairs: list[tuple[int, int]], selection: tuple[int, int]) -> tuple[list[PolyElement], list[tuple[int, int]]]:
     from grobnerRl.envs.deepgroebner import spoly
     i, j = selection
     pairs.remove((i, j))
