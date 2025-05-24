@@ -11,3 +11,4 @@ scipy
 mypy
 pytest
 ruff
+seaborn

@@ -1,27 +1,11 @@
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 from grobnerRl.envs.ideals import random_ideal
 from grobnerRl.envs.deepgroebner import buchberger
+from grobnerRl.benchmark.optimalReductions import optimal_reductions
 from typing import Optional
 
-def display_obs(obs: tuple[list, list]) -> None:
-    """
-    Prints the components of an observation (ideal and selectables).
-
-    Args:
-        obs (tuple[list, list]): A tuple containing:
-            - ideal (list): The current list of polynomials in the ideal.
-            - selectables (list): The list of selectable S-polynomial pairs.
-    """
-    ideal, selectables = obs
-
-    print("\nIdeal:")
-    for poly in ideal:
-        print(poly)
-
-    print("\nSelectables:")
-    for selectable in selectables:
-        print(selectable)
 
 def benchmark_game(strategy: str, ideal: list, step_limit: Optional[int] = None) -> tuple[list, int]:
     '''
@@ -38,11 +22,15 @@ def benchmark_game(strategy: str, ideal: list, step_limit: Optional[int] = None)
             - basis (list): The computed Gröbner basis.
             - steps (int): The number of steps taken to compute the basis.
     '''
-
     basis, info = buchberger(ideal, selection=strategy, step_limit=step_limit)
+
+    if not info['valid']:
+        return [], None
+
     steps: int = info['steps']
 
     return basis, steps
+
 
 def benchmark_agent(strategy: str, num_episodes: int, step_limit: Optional[int], *ideal_params: list) -> None:
     """
@@ -65,6 +53,7 @@ def benchmark_agent(strategy: str, num_episodes: int, step_limit: Optional[int],
         step_counts.append(step_count)
 
     plot_pdf(step_counts, strategy)
+
 
 def compare_agents(strategy1: str, strategy2: str, num_episodes: int, *ideal_params: list) -> None:
     """
@@ -90,6 +79,27 @@ def compare_agents(strategy1: str, strategy2: str, num_episodes: int, *ideal_par
 
     plot_pdf(step_diffs, f'{strategy1}_vs_{strategy2}')
 
+
+def display_obs(obs: tuple[list, list]) -> None:
+    """
+    Prints the components of an observation (ideal and selectables).
+
+    Args:
+        obs (tuple[list, list]): A tuple containing:
+            - ideal (list): The current list of polynomials in the ideal.
+            - selectables (list): The list of selectable S-polynomial pairs.
+    """
+    ideal, selectables = obs
+
+    print("\nIdeal:")
+    for poly in ideal:
+        print(poly.as_expr())
+
+    print("\nSelectables:")
+    for selectable in selectables:
+        print(selectable)
+
+
 def plot_pdf(step_counts: list[int], strategy_name: str) -> None:
     """
     Plots and saves a probability density function (histogram) of step counts.
@@ -111,3 +121,42 @@ def plot_pdf(step_counts: list[int], strategy_name: str) -> None:
     plt.grid()
     plt.savefig(f'{strategy_name}.png')
     plt.close()
+
+
+def optimal_vs_standard(num_episodes: int, *ideal_params: list) -> None:
+    '''
+    compare the optimal reductions with the standard Buchberger's algorithm
+    '''
+    points = []
+    optimal_fail = 0
+    standard_fail = 0
+
+    for _ in range(num_episodes):
+        ideal = random_ideal(*ideal_params)
+        _, reds, _ = optimal_reductions(ideal, 10000)
+        _, num_steps = benchmark_game('normal', ideal, 1000)
+
+        if not reds:
+            optimal_fail += 1
+
+        if not num_steps:
+            standard_fail += 1
+
+        if not reds or not num_steps:
+            continue
+
+        if len(reds) > num_steps:
+            print('problematic ideal')
+            display_obs((ideal, []))
+
+        points.append((len(reds), num_steps))
+
+    print(f'optimal reductions failed {optimal_fail} times')
+    print(f'standard reductions failed {standard_fail} times')
+    print(len(points))
+
+    sns.set_theme(style="whitegrid")
+    plt.scatter(*zip(*points), alpha=0.5)
+    plt.xlabel('optimal reductions')
+    plt.ylabel('standard reductions')
+    plt.savefig(os.path.join('figs', 'optimal_vs_standard.png'))
