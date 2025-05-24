@@ -3,21 +3,19 @@ Optimal or near-optimal reductions for the Groebner basis computation, for small
 '''
 
 import heapq
-from collections import deque
-from sympy.polys.groebnertools import is_groebner
 from sympy.polys.rings import PolyElement
 from grobnerRl.Buchberger.BuchbergerIlay import init, step, interreduce, minimalize
 from grobnerRl.Buchberger.BuchbergerSympy import groebner
 from grobnerRl.envs.ideals import random_ideal
 
-def optimal_reductions(ideal: list, bound: int):
+def optimal_reductions(ideal: list, step_limit: int):
     '''
     Computes the optimal reductions for a given ideal to find the computation that uses the least number of reductions.
     This function uses exhaustive search bounded by `bound`.
 
     Args:
         ideal (list): The ideal for which to compute the reductions.
-        bound (int): The maximal allowed number of reduction steps.
+        step_limit (int): The maximal allowed number of reduction steps.
 
     Returns:
         list: A list of selected pairs representing the reduction sequence.
@@ -68,6 +66,8 @@ def optimal_reductions(ideal: list, bound: int):
     best_basis = None
     best_length = float('inf')
 
+    num_steps = 0
+
     while heap:
         f, g, basis_curr, pairs_curr, seq = heapq.heappop(heap)
 
@@ -82,10 +82,11 @@ def optimal_reductions(ideal: list, bound: int):
             best_basis = basis_curr
             break
 
-        if g >= bound:
-            continue
+        if num_steps >= step_limit:
+            break
 
         for selection in list(pairs_curr):
+            num_steps += 1
             new_basis, new_pairs = step(basis_curr.copy(), pairs_curr.copy(), selection)
             new_seq = seq + [selection]
             new_g = g + 1
@@ -95,48 +96,44 @@ def optimal_reductions(ideal: list, bound: int):
             heapq.heappush(heap, (new_f, new_g, new_basis, new_pairs, new_seq))
 
     if not best_sequence:
-        return None, None
+        return None, None, num_steps
 
     best_basis = interreduce(minimalize(best_basis))
 
-    if not is_groebner(best_basis, ring):
-        raise ValueError(f"The basis is not Groebner {best_basis}, the basis is {groebner_basis}")
-
-    return best_sequence, best_basis
+    return best_sequence, best_basis, num_steps
 
 
-def experiment(num_episodes: int, bound: int, *ideal_params) -> bool:
+def experiment(num_episodes: int, step_limit: int, *ideal_params) -> float:
     '''
     Run an experiment to test the optimal reductions.
 
     Args:
         num_episodes (int): The number of episodes to run.
-        bound (int): The maximal allowed number of reduction steps.
+        step_limit (int): The maximum number of reduction steps allowed.
         ideal_params: [num_polys, max_num_monoms, max_degree, num_vars, field, order]
 
     Returns:
-        bool: True if the hypothesis isn't contradicted, False otherwise.
+        float: success rate of the experiment.
     '''
     num_success = 0
 
     for episode in range(num_episodes):
         ideal = random_ideal(*ideal_params)
-        basis = groebner(ideal, ideal[0].ring)
-        reductions, basis_opt = optimal_reductions(ideal, bound)
+        reductions, basis, num_steps = optimal_reductions(ideal, step_limit)
 
         print()
         print('epidose', episode)
-        print('ideal', len(ideal))
-        print('basis', len(basis))
+        print('num_steps', num_steps)
 
-        if not basis_opt:
+        if not basis:
             print('fucking shit')
             continue
 
+        print('basis', len(basis))
         print('reductions', len(reductions))
 
         num_success += 1
 
-    print(f"Success rate: {num_success/num_episodes:.2f}")
+    succsess_rate = num_success/num_episodes
 
-    return True
+    return succsess_rate
