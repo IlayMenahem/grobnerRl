@@ -2,7 +2,7 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from grobnerRl.envs.ideals import random_ideal
-from grobnerRl.envs.deepgroebner import buchberger
+from grobnerRl.Buchberger.BuchbergerIlay import buchberger
 from grobnerRl.benchmark.optimalReductions import optimal_reductions
 from typing import Optional
 
@@ -127,36 +127,28 @@ def optimal_vs_standard(num_episodes: int, *ideal_params: list) -> None:
     '''
     compare the optimal reductions with the standard Buchberger's algorithm
     '''
-    points = []
-    optimal_fail = 0
-    standard_fail = 0
+    points: list[tuple[int,int]] = []
+    optimal_fail: int = 0
 
     for _ in range(num_episodes):
         ideal = random_ideal(*ideal_params)
         _, reds, _ = optimal_reductions(ideal, 10000)
-        _, num_steps = benchmark_game('normal', ideal, 1000)
+        _, normal_reds = buchberger(ideal)
 
         if not reds:
             optimal_fail += 1
-
-        if not num_steps:
-            standard_fail += 1
-
-        if not reds or not num_steps:
             continue
 
-        if len(reds) > num_steps:
+        if len(reds) > len(normal_reds):
             print('problematic ideal')
             display_obs((ideal, []))
 
-        points.append((len(reds), num_steps))
+        points.append((len(reds), len(normal_reds)))
 
     print(f'optimal reductions failed {optimal_fail} times')
-    print(f'standard reductions failed {standard_fail} times')
-    print(len(points))
 
-    sns.set_theme(style="whitegrid")
     plt.scatter(*zip(*points), alpha=0.5)
     plt.xlabel('optimal reductions')
     plt.ylabel('standard reductions')
     plt.savefig(os.path.join('figs', 'optimal_vs_standard.png'))
+    plt.close()
