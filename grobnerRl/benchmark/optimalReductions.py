@@ -2,11 +2,30 @@
 Optimal or near-optimal reductions for the Groebner basis computation, for small ideals
 '''
 
+import math
+import random
 import heapq
 from sympy.polys.rings import PolyElement
-from grobnerRl.Buchberger.BuchbergerIlay import init, step, interreduce, minimalize
+from grobnerRl.Buchberger.BuchbergerIlay import init, step, interreduce, minimalize, buchberger
 from grobnerRl.Buchberger.BuchbergerSympy import groebner
 from grobnerRl.envs.ideals import random_ideal
+
+
+def state_key(basis: list, pairs: list) -> tuple:
+    '''
+    Create a unique key for the state based on the basis and pairs.
+
+    Args:
+        basis (list): The current basis.
+        pairs (list): The current pairs.
+
+    Returns:
+        tuple: A tuple representing the state key.
+    '''
+    basis_key = tuple(sorted(str(p) for p in basis))
+    pairs_key = tuple(sorted(pairs))
+    return (basis_key, pairs_key)
+
 
 def optimal_reductions(ideal: list, step_limit: int):
     '''
@@ -21,20 +40,6 @@ def optimal_reductions(ideal: list, step_limit: int):
         list: A list of selected pairs representing the reduction sequence.
         list: The Grobner basis of the ideal obtained by the sequence.
     '''
-    def state_key(basis: list, pairs: list) -> tuple:
-        '''
-        Create a unique key for the state based on the basis and pairs.
-
-        Args:
-            basis (list): The current basis.
-            pairs (list): The current pairs.
-
-        Returns:
-            tuple: A tuple representing the state key.
-        '''
-        basis_key = tuple(sorted(str(p) for p in basis))
-        pairs_key = tuple(sorted(pairs))
-        return (basis_key, pairs_key)
 
     ring = ideal[0].ring
     groebner_basis = groebner(ideal, ring)
@@ -57,16 +62,15 @@ def optimal_reductions(ideal: list, step_limit: int):
 
     pairs, basis = init(ideal)
 
+    visited = {}
     heap = []
     initial_h = heuristic(basis)
     heapq.heappush(heap, (initial_h, 0, basis, pairs, []))
-    visited = {}
 
+    num_steps = 0
     best_sequence = None
     best_basis = None
     best_length = float('inf')
-
-    num_steps = 0
 
     while heap:
         f, g, basis_curr, pairs_curr, seq = heapq.heappop(heap)
