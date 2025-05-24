@@ -3,11 +3,10 @@ Optimal or near-optimal reductions for the Groebner basis computation, for small
 '''
 
 from collections import deque
-from sympy.polys.groebnertools import is_groebner, is_minimal, is_reduced
-from sympy.polys.domains import ZZ
+from sympy.polys.groebnertools import is_groebner
 from sympy.polys.rings import PolyElement
-from grobnerRl.Buchberger.BuchbergerSympy import init, buchberger_step
-from grobnerRl.envs.deepgroebner import minimalize, interreduce, buchberger
+from grobnerRl.Buchberger.BuchbergerIlay import init, step, interreduce, minimalize
+from grobnerRl.Buchberger.BuchbergerSympy import groebner
 from grobnerRl.envs.ideals import random_ideal
 
 def optimal_reductions(ideal: list, bound: int):
@@ -38,8 +37,9 @@ def optimal_reductions(ideal: list, bound: int):
         pairs_key = tuple(sorted(pairs))
         return (basis_key, pairs_key)
 
-    groebner, _ = buchberger(ideal)
-    groebner_lt = set(p.LT for p in groebner)
+    ring = ideal[0].ring
+    groebner_basis = groebner(ideal, ring)
+    groebner_lt = set(p.LT for p in groebner_basis)
     def heuristic(basis: list[PolyElement]) -> int:
         '''
         an addmissable heuristic function, the heuristic is the number of leading terms
@@ -47,8 +47,6 @@ def optimal_reductions(ideal: list, bound: int):
 
         Args:
             basis (list): The current basis.
-            pairs (list): The current pairs.
-            *args: Additional arguments.
 
         Returns:
             int: The heuristic value.
@@ -69,7 +67,6 @@ def optimal_reductions(ideal: list, bound: int):
     while queue:
         basis_curr, pairs_curr, seq = queue.popleft()
 
-        # If no pairs left, Grobner basis found
         if not pairs_curr and len(seq) < best_length:
             best_length = len(seq)
             best_sequence = seq
@@ -84,21 +81,24 @@ def optimal_reductions(ideal: list, bound: int):
         visited.add(key)
 
         for selection in list(pairs_curr):
-            new_basis, new_pairs = buchberger_step(basis_curr.copy(), pairs_curr.copy(), selection)
+            new_basis, new_pairs = step(basis_curr.copy(), pairs_curr.copy(), selection)
             new_seq = seq + [selection]
             queue.append((new_basis, new_pairs, new_seq))
 
+    if not best_sequence:
+        return None, None
+
     best_basis = interreduce(minimalize(best_basis))
 
-    if not is_groebner(best_basis, ideal[0].ring):
-        raise ValueError(f"The basis is not Groebner {best_basis}, the basis is {basis}")
+    if not is_groebner(best_basis, ring):
+        raise ValueError(f"The basis is not Groebner {best_basis}, the basis is {groebner_basis}")
 
     return best_sequence, best_basis
 
 
-def test_hypothesis(num_episodes: int, bound: int, *ideal_params) -> bool:
+def experiment(num_episodes: int, bound: int, *ideal_params) -> bool:
     '''
-    test an hypothesis for the optimal reductions
+    Run an experiment to test the optimal reductions.
 
     Args:
         num_episodes (int): The number of episodes to run.
@@ -110,19 +110,23 @@ def test_hypothesis(num_episodes: int, bound: int, *ideal_params) -> bool:
     '''
     num_success = 0
 
-    for _ in range(num_episodes):
+    for episode in range(num_episodes):
         ideal = random_ideal(*ideal_params)
-        basis, _ = buchberger(ideal)
+        basis = groebner(ideal, ideal[0].ring)
         reductions, basis_opt = optimal_reductions(ideal, bound)
 
+        print()
+        print('epidose', episode)
+        print('ideal', len(ideal))
+        print('basis', len(basis))
+
         if not basis_opt:
+            print('fucking shit')
             continue
 
-        num_success += 1
-        print('ideal', len(ideal))
-        print('basis', len(basis_opt))
         print('reductions', len(reductions))
-        print()
+
+        num_success += 1
 
     print(f"Success rate: {num_success/num_episodes:.2f}")
 
