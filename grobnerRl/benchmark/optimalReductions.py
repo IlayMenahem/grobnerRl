@@ -2,6 +2,7 @@
 Optimal or near-optimal reductions for the Groebner basis computation, for small ideals
 '''
 
+import heapq
 from collections import deque
 from sympy.polys.groebnertools import is_groebner
 from sympy.polys.rings import PolyElement
@@ -54,36 +55,44 @@ def optimal_reductions(ideal: list, bound: int):
         basis_lt = set(p.LT for p in basis)
         remaining_lt = len(groebner_lt - basis_lt)
 
-        return remaining_lt
+        return int(remaining_lt)
 
     pairs, basis = init(ideal)
+
+    heap = []
+    initial_h = heuristic(basis)
+    heapq.heappush(heap, (initial_h, 0, basis, pairs, []))
+    visited = {}
 
     best_sequence = None
     best_basis = None
     best_length = float('inf')
-    queue: deque[tuple] = deque([(basis, pairs, [])])
-    visited = set()
 
-    while queue:
-        basis_curr, pairs_curr, seq = queue.popleft()
-
-        if not pairs_curr and len(seq) < best_length:
-            best_length = len(seq)
-            best_sequence = seq
-            best_basis = basis_curr
-
-        if len(seq) >= bound:
-            return best_sequence, best_basis
+    while heap:
+        f, g, basis_curr, pairs_curr, seq = heapq.heappop(heap)
 
         key = state_key(basis_curr, pairs_curr)
-        if key in visited:
+        if key in visited and visited[key] <= g:
             continue
-        visited.add(key)
+        visited[key] = g
+
+        if not pairs_curr and g < best_length:
+            best_length = g
+            best_sequence = seq
+            best_basis = basis_curr
+            break
+
+        if g >= bound:
+            continue
 
         for selection in list(pairs_curr):
             new_basis, new_pairs = step(basis_curr.copy(), pairs_curr.copy(), selection)
             new_seq = seq + [selection]
-            queue.append((new_basis, new_pairs, new_seq))
+            new_g = g + 1
+            new_h = heuristic(new_basis)
+            new_f = new_g + new_h
+
+            heapq.heappush(heap, (new_f, new_g, new_basis, new_pairs, new_seq))
 
     if not best_sequence:
         return None, None
