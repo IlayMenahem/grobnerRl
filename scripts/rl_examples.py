@@ -6,7 +6,7 @@ import gymnasium as gym
 from grobnerRl.rl.a2c import train_a2c, TransitionSet
 from grobnerRl.rl.dqn import train_dqn, ReplayBuffer, dqn_loss
 
-class poll_agent(eqx.Module):
+class agent(eqx.Module):
     linear1: eqx.nn.Linear
     linear2: eqx.nn.Linear
     linear3: eqx.nn.Linear
@@ -36,40 +36,39 @@ class poll_agent(eqx.Module):
         return q_values
 
 
-class poll_policy(eqx.Module):
-    poll_value: poll_agent
+class policy(eqx.Module):
+    value: agent
 
     def __init__(self, input_size: int, output_size: int, key):
-        self.poll_value = poll_agent(input_size, output_size, key)
-    
+        self.value = agent(input_size, output_size, key)
+
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        vals = self.poll_value(x)
+        vals = self.value(x)
         probs = jax.nn.softmax(vals)
 
         return probs
 
 def a2c_example():
-    
     num_episodes = 1000
-    n_steps = 256
-    gamma = 0.9
+    n_steps = 512
+    gamma = 0.99
     seed = 0
     key = jax.random.key(seed)
 
-    env = gym.make('Acrobot-v1', max_episode_steps=250)
+    env = gym.make('CartPole-v1', max_episode_steps=250)
     replay_buffer = TransitionSet(n_steps)
-    policy = poll_policy(6, 3, key)
-    critic = poll_agent(6, 1, key)
+    actor = policy(4, 2, key)
+    critic = agent(4, 1, key)
 
     optimizer_policy = optax.adam(1e-4)
-    optimizer_policy_state = optimizer_policy.init(policy)
-    optimizer_critic = optax.adam(1e-3)
+    optimizer_policy_state = optimizer_policy.init(actor)
+    optimizer_critic = optax.adam(3e-4)
     optimizer_critic_state = optimizer_critic.init(critic)
 
-    policy, critic, scores, losses = train_a2c(env, replay_buffer, policy, critic, 
-        optimizer_policy, optimizer_policy_state, optimizer_critic, optimizer_critic_state, 
+    actor, critic, scores, losses = train_a2c(env, replay_buffer, actor, critic,
+        optimizer_policy, optimizer_policy_state, optimizer_critic, optimizer_critic_state,
         gamma, num_episodes, n_steps, key)
-    
+
     env.close()
     print(scores)
 
@@ -90,8 +89,8 @@ def dqn_example():
 
     key = jax.random.key(seed)
     key, subkey1, subkey2 = jax.random.split(key, 3)
-    q_network = poll_agent(6, 3, subkey1)
-    target_network = poll_agent(6, 3, subkey2)
+    q_network = agent(6, 3, subkey1)
+    target_network = agent(6, 3, subkey2)
     env = gym.make('Acrobot-v1', max_episode_steps=250)
 
     replay_buffer = ReplayBuffer(capacity, batch_size)
@@ -108,4 +107,4 @@ def dqn_example():
     env.close()
 
 if __name__ == "__main__":
-    dqn_example()
+    a2c_example()

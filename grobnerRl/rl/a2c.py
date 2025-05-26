@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import optax
 from tqdm import tqdm
 import equinox as eqx
+import gymnasium as gym
 from chex import Array
 
 from grobnerRl.rl.utils import TimeStep, GroebnerState, update_network
@@ -21,7 +22,7 @@ class TransitionSet:
     def store(self, obs: GroebnerState, act: tuple[int, ...] | int, rew: float, next_obs: GroebnerState, done: bool) -> None:
         self.queue.append(TimeStep(obs, act, rew, next_obs, done))
 
-    def sample_and_clear(self) -> deque[TimeStep]:
+    def sample_and_clear(self) -> tuple[Array, Array, Array, Array, Array]:
         res = (jnp.array([t.obs for t in self.queue]),
             jnp.array([t.action for t in self.queue]),
             jnp.array([t.reward for t in self.queue]),
@@ -33,7 +34,7 @@ class TransitionSet:
 
 
 @jit
-def advantage(critic, reward, gamma, state, next_state, done):
+def compute_value_and_target(critic, reward, gamma, state, next_state, done):
     value = critic(state)
     next_value = critic(next_state)
 
@@ -46,7 +47,7 @@ def advantage(critic, reward, gamma, state, next_state, done):
 def advantage_loss(critic: eqx.Module, gamma: float, batch: tuple):
     state, _, reward, next_state, done = batch
 
-    value, target = vmap(advantage, in_axes=(None, 0, None, 0, 0, 0))(critic, reward, gamma, state, next_state, done)
+    value, target = vmap(compute_value_and_target, in_axes=(None, 0, None, 0, 0, 0))(critic, reward, gamma, state, next_state, done)
     loss = jnp.mean(optax.l2_loss(value, target))
 
     return loss
@@ -57,11 +58,12 @@ def policy_loss(policy, critic, gamma, batch):
     states, actions, rewards, next_states, done = batch
 
     def policy_loss_fn(policy, critic, state, next_state, action, gamma, reward, done):
-        _, adva = advantage(critic, reward, gamma, state, next_state, done)
+        value, target = compute_value_and_target(critic, reward, gamma, state, next_state, done)
+        advantage = target - value
         log_prob = jnp.log(policy(state)[action])
-        
-        return -adva * log_prob
-    
+
+        return -log_prob * advantage
+
     loss = vmap(policy_loss_fn, in_axes=(None, None, 0, 0, 0, None, 0, 0))(policy, critic, states, next_states, actions, gamma, rewards, done)
     loss = jnp.mean(loss)
 
@@ -93,13 +95,41 @@ def collect_transitions(env, replay_buffer, policy, n_steps, key, scores, episod
             obs, _ = env.reset()
             scores.append(episode_score)
             episode_score = 0.0
-    
+
     return env, replay_buffer, policy, key, scores, episode_score, obs
 
 
-def train_a2c(env, replay_buffer: TransitionSet, policy: eqx.Module, critic: eqx.Module, 
-    optimizer_policy, optimizer_policy_state, optimizer_critic, optimizer_critic_state, 
+def train_a2c(env: gym.Env, replay_buffer: TransitionSet, policy: eqx.Module, critic: eqx.Module,
+    optimizer_policy, optimizer_policy_state, optimizer_critic, optimizer_critic_state,
     gamma: float, num_episodes: int, n_steps: int, key) -> tuple[eqx.Module, eqx.Module, list[float], list[tuple[float, float]]]:
+    '''
+    Train an Advantage Actor-Critic (A2C) agent.
+
+    This function implements the A2C algorithm, which combines policy gradient methods
+    with value function approximation. The actor (policy) learns to select actions
+    while the critic (value function) estimates state values to reduce variance.
+
+    Args:
+        env: The environment to train on
+        replay_buffer: TransitionSet buffer to store and sample experience transitions
+        policy: The actor network (policy) as an Equinox module
+        critic: The critic network (value function) as an Equinox module
+        optimizer_policy: Optax optimizer for the policy network
+        optimizer_policy_state: State of the policy optimizer
+        optimizer_critic: Optax optimizer for the critic network
+        optimizer_critic_state: State of the critic optimizer
+        gamma: Discount factor for future rewards (0 < gamma <= 1)
+        num_episodes: Number of training episodes to run
+        n_steps: Number of environment steps to collect per episode before updating
+        key: JAX random key for stochastic operations
+
+    Returns:
+        tuple containing:
+            - policy: Updated policy network
+            - critic: Updated critic network
+            - scores: List of episode scores achieved during training
+            - losses: List of tuples containing (actor_loss, critic_loss) for each episode
+    '''
     scores = []
     losses = []
 
