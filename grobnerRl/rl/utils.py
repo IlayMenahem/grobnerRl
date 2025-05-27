@@ -34,7 +34,7 @@ def update_network(network: eqx.Module, optimizer: optax.GradientTransformation,
     loss, grads = value_and_grad(loss_fn)(network, *loss_args)
     updates, optimizer_state = optimizer.update(grads, optimizer_state)
     network = optax.apply_updates(network, updates)
-    
+
     return network, loss, optimizer_state
 
 
@@ -95,7 +95,7 @@ def callback_eval(model, env, num_episodes: int) -> float:
     return mean_reward
 
 
-def plot_learning_process(scores: list[float], losses: list[float], epsilons: list[float]) -> None:
+def plot_learning_process(scores: list[float], vals1: list[float], vals2: list[float]) -> None:
     '''
     Plots the training scores, losses, and epsilon values.
 
@@ -107,9 +107,6 @@ def plot_learning_process(scores: list[float], losses: list[float], epsilons: li
     Returns:
     None
     '''
-    # smooth the losses
-    smoothing_length_losses = 100
-    smoothed_losses = scipy.signal.convolve(losses, np.ones(smoothing_length_losses) / smoothing_length_losses, mode='valid')
     smoothing_length_scores = 5
     smoothed_scores = scipy.signal.convolve(scores, np.ones(smoothing_length_scores) / smoothing_length_scores, mode='valid')
 
@@ -122,16 +119,12 @@ def plot_learning_process(scores: list[float], losses: list[float], epsilons: li
     plt.grid(True)
     plt.subplot(132)
     plt.title('loss')
-    plt.plot(smoothed_losses)
+    plt.plot(vals1)
     plt.xlabel("Update step")
-    plt.ylabel("Loss")
     plt.grid(True)
     plt.subplot(133)
-    plt.title('epsilons')
-    plt.plot(epsilons)
+    plt.plot(vals2)
     plt.xlabel("Update step")
-    plt.ylabel("Epsilon")
     plt.grid(True)
     plt.tight_layout()
     plt.show()
-    

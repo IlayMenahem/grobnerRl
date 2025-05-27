@@ -49,13 +49,13 @@ class policy(eqx.Module):
         return probs
 
 def a2c_example():
-    num_episodes = 1000
-    n_steps = 512
+    num_episodes = 100
+    n_steps = 1024
     gamma = 0.99
     seed = 0
     key = jax.random.key(seed)
 
-    env = gym.make('CartPole-v1', max_episode_steps=250)
+    env = gym.make('CartPole-v1', max_episode_steps=500)
     replay_buffer = TransitionSet(n_steps)
     actor = policy(4, 2, key)
     critic = agent(4, 1, key)
@@ -70,7 +70,7 @@ def a2c_example():
         gamma, num_episodes, n_steps, key)
 
     env.close()
-    print(scores)
+
 
 def dqn_example():
     num_steps = 50000

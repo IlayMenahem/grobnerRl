@@ -2,13 +2,12 @@ from collections import deque
 import jax
 from jax import vmap, jit
 import jax.numpy as jnp
-import optax
 from tqdm import tqdm
 import equinox as eqx
 import gymnasium as gym
 from chex import Array
 
-from grobnerRl.rl.utils import TimeStep, GroebnerState, update_network
+from grobnerRl.rl.utils import TimeStep, GroebnerState, update_network, plot_learning_process
 
 
 class TransitionSet:
@@ -34,21 +33,22 @@ class TransitionSet:
 
 
 @jit
-def compute_value_and_target(critic, reward, gamma, state, next_state, done):
+def compute_advantage(critic, reward, gamma, state, next_state, done):
     value = critic(state)
     next_value = critic(next_state)
 
     target = reward + gamma * next_value * (1 - done)
+    advantage = target - value
 
-    return value, target
+    return advantage
 
 
 @jit
 def advantage_loss(critic: eqx.Module, gamma: float, batch: tuple):
     state, _, reward, next_state, done = batch
 
-    value, target = vmap(compute_value_and_target, in_axes=(None, 0, None, 0, 0, 0))(critic, reward, gamma, state, next_state, done)
-    loss = jnp.mean(optax.l2_loss(value, target))
+    advantage = vmap(compute_advantage, in_axes=(None, 0, None, 0, 0, 0))(critic, reward, gamma, state, next_state, done)
+    loss = jnp.mean(advantage**2)
 
     return loss
 
@@ -58,8 +58,7 @@ def policy_loss(policy, critic, gamma, batch):
     states, actions, rewards, next_states, done = batch
 
     def policy_loss_fn(policy, critic, state, next_state, action, gamma, reward, done):
-        value, target = compute_value_and_target(critic, reward, gamma, state, next_state, done)
-        advantage = target - value
+        advantage = compute_advantage(critic, reward, gamma, state, next_state, done)
         log_prob = jnp.log(policy(state)[action])
 
         return -log_prob * advantage
@@ -149,5 +148,7 @@ def train_a2c(env: gym.Env, replay_buffer: TransitionSet, policy: eqx.Module, cr
         progress_bar.update(1)
 
     progress_bar.close()
+    policy_losses, critic_losses = map(list, zip(*losses))
+    plot_learning_process(scores, policy_losses, critic_losses)
 
     return policy, critic, scores, losses
