@@ -1,10 +1,9 @@
 from collections import deque
 import jax
-from jax import vmap, jit
+from jax import jit
 import jax.numpy as jnp
 from tqdm import tqdm
 import equinox as eqx
-import gymnasium as gym
 from chex import Array
 
 from grobnerRl.rl.utils import TimeStep, GroebnerState, update_network, plot_learning_process
@@ -21,12 +20,12 @@ class TransitionSet:
     def store(self, obs: GroebnerState, act: tuple[int, ...] | int, rew: float, next_obs: GroebnerState, done: bool) -> None:
         self.queue.append(TimeStep(obs, act, rew, next_obs, done))
 
-    def sample_and_clear(self) -> tuple[Array, Array, Array, Array, Array]:
-        res = (jnp.array([t.obs for t in self.queue]),
-            jnp.array([t.action for t in self.queue]),
-            jnp.array([t.reward for t in self.queue]),
-            jnp.array([t.next_obs for t in self.queue]),
-            jnp.array([t.done for t in self.queue]))
+    def sample_and_clear(self) -> tuple[list,...]:
+        res = ([t.obs for t in self.queue],
+            [jnp.array(t.action) for t in self.queue],
+            [jnp.array(t.reward) for t in self.queue],
+            [t.next_obs for t in self.queue],
+            [jnp.array(t.done) for t in self.queue])
         self.queue = deque(maxlen=self.size)
 
         return res
@@ -43,28 +42,34 @@ def compute_advantage(critic, reward, gamma, state, next_state, done):
     return advantage
 
 
-@jit
 def advantage_loss(critic: eqx.Module, gamma: float, batch: tuple):
     state, _, reward, next_state, done = batch
 
-    advantage = vmap(compute_advantage, in_axes=(None, 0, None, 0, 0, 0))(critic, reward, gamma, state, next_state, done)
-    loss = jnp.mean(advantage**2)
+    @jit
+    def advantage_loss_fn(reward, state, next_state, done):
+        advantage = compute_advantage(critic, reward, gamma, state, next_state, done)
+        loss = advantage**2
+
+        return loss
+
+    loss = jax.tree.map(advantage_loss_fn, reward, state, next_state, done)
+    loss = jnp.mean(jnp.array(loss))
 
     return loss
 
 
-@jit
 def policy_loss(policy, critic, gamma, batch):
     states, actions, rewards, next_states, done = batch
 
-    def policy_loss_fn(policy, critic, state, next_state, action, gamma, reward, done):
+    @jit
+    def policy_loss_fn(action, state, next_state, reward, done):
         advantage = compute_advantage(critic, reward, gamma, state, next_state, done)
         log_prob = jnp.log(policy(state)[action])
 
         return -log_prob * advantage
 
-    loss = vmap(policy_loss_fn, in_axes=(None, None, 0, 0, 0, None, 0, 0))(policy, critic, states, next_states, actions, gamma, rewards, done)
-    loss = jnp.mean(loss)
+    loss = jax.tree.map(policy_loss_fn, actions, states, next_states, rewards, done)
+    loss = jnp.mean(jnp.array(loss))
 
     return loss
 
@@ -98,7 +103,7 @@ def collect_transitions(env, replay_buffer, policy, n_steps, key, scores, episod
     return env, replay_buffer, policy, key, scores, episode_score, obs
 
 
-def train_a2c(env: gym.Env, replay_buffer: TransitionSet, policy: eqx.Module, critic: eqx.Module,
+def train_a2c(env, replay_buffer: TransitionSet, policy: eqx.Module, critic: eqx.Module,
     optimizer_policy, optimizer_policy_state, optimizer_critic, optimizer_critic_state,
     gamma: float, num_episodes: int, n_steps: int, key) -> tuple[eqx.Module, eqx.Module, list[float], list[tuple[float, float]]]:
     '''
