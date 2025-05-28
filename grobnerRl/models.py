@@ -193,3 +193,19 @@ class GrobnerModel(eqx.Module):
         values = jnp.where(mask == 1, values, self.masking_value)
 
         return values
+
+
+class GrobnerPolicy(eqx.Module):
+    model: GrobnerModel
+
+    def __init__(self, groebner_model: GrobnerModel):
+        if groebner_model.masking_value != -jnp.inf:
+            raise ValueError("GrobnerModel masking_value must be -jnp.inf for proper masking in the policy")
+
+        self.model = groebner_model
+
+    def __call__(self, obs: GroebnerState) -> Array:
+        vals = self.model(obs)
+        probs = jax.nn.softmax(vals, axis=None)
+
+        return probs
