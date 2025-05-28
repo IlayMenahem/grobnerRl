@@ -1,36 +1,16 @@
 from collections import deque
-from functools import partial
 import random
-
 import jax
-from jax import vmap
+from jax import vmap, jit
 import jax.numpy as jnp
 import optax
 from tqdm import tqdm
 import equinox as eqx
 from chex import Array
-
 from grobnerRl.rl.utils import TimeStep, GroebnerState, plot_learning_process
 
 
-
-def td_loss(q_network: eqx.Module, target_network: eqx.Module, gamma: float, obs: GroebnerState,
-    next_obs: GroebnerState, action, reward, done) -> Array:
-    q_vals = q_network(obs)
-    q_curr = q_vals[action]
-
-    target_q_next = target_network(next_obs)
-    q_next = jnp.max(target_q_next)
-
-    mask = jnp.where(done, 0.0, 1.0)
-    target = jax.lax.stop_gradient(reward + gamma * q_next * mask)
-
-    loss = optax.losses.huber_loss(q_curr, target)
-
-    return loss
-
-
-@jax.jit
+@jit
 def dqn_loss(q_network: eqx.Module, target_network: eqx.Module, gamma: float, batch: dict) -> jnp.ndarray:
     '''
     computes the loss for the Double DQN
@@ -51,9 +31,21 @@ def dqn_loss(q_network: eqx.Module, target_network: eqx.Module, gamma: float, ba
     rewards: list[Array] = batch['rews']
     dones: list[Array] = batch['done']
 
-    td_wrapper = partial(td_loss, q_network, target_network, gamma)
-    
-    losses = vmap(td_wrapper)(observations, next_observations, actions, rewards, dones)
+    def td_loss(obs: GroebnerState, next_obs: GroebnerState, action: Array, reward: Array, done: Array) -> Array:
+        q_vals = q_network(obs)
+        q_curr = q_vals[action]
+
+        target_q_next = target_network(next_obs)
+        q_next = jnp.max(target_q_next)
+
+        mask = jnp.where(done, 0.0, 1.0)
+        target = jax.lax.stop_gradient(reward + gamma * q_next * mask)
+
+        loss = optax.losses.huber_loss(q_curr, target)
+
+        return loss
+
+    losses = vmap(td_loss)(observations, next_observations, actions, rewards, dones)
     loss = jnp.mean(losses)
 
     return loss
@@ -88,27 +80,6 @@ class ReplayBuffer:
         return len(self.queue) >= self.batch_size
 
 
-def uniform_sample_index(key: Array, mask: Array):
-    '''
-    samples an array index uniformly from the array
-
-    Args:
-    - key (Array): random key for jax
-    - mask (Array): mask of legal indices
-
-    returns:
-    - result (Array | int): sampled index
-    '''
-    flat_mask = mask.reshape(-1)
-    flat_length = len(flat_mask)
-    flat_indices = jnp.arange(flat_length)[flat_mask]
-    sampled_index = jax.random.choice(key, flat_indices)
-    sampled_index = jnp.unravel_index(sampled_index, mask.shape)
-    sampled_index = jnp.array(sampled_index)
-
-    return sampled_index
-
-
 def select_action_epsilon(dqn: eqx.Module, obs: Array, epsilon: float, key: Array) -> tuple[int, ...]:
     '''
     selects an action using epsilon-greedy policy
@@ -122,21 +93,34 @@ def select_action_epsilon(dqn: eqx.Module, obs: Array, epsilon: float, key: Arra
     returns:
     - action (tuple[int, ...]): selected action
     '''
-    q_vals = eqx.nn.inference_mode(dqn)(obs)
+    def uniform_sample_index(key: Array, mask: Array) -> Array:
+        flat_mask = mask.reshape(-1)
+        flat_length = len(flat_mask)
+        flat_indices = jnp.arange(flat_length)[flat_mask]
+        sampled_index = jax.random.choice(key, flat_indices)
+        sampled_index = jnp.unravel_index(sampled_index, mask.shape)
+        sampled_index = jnp.array(sampled_index)
+
+        return sampled_index
+
+    q_vals = dqn(obs)
     is_legal = jnp.isfinite(q_vals)
 
     greedy_action = jnp.array(jnp.unravel_index(jnp.argmax(q_vals), q_vals.shape))
     epsilon_action = uniform_sample_index(key, is_legal)
     chosen_action = jax.lax.select(jax.random.uniform(key) < epsilon, epsilon_action, greedy_action)
 
-    # chosen_action = tuple(i.item() for i in chosen_action)
-    chosen_action = chosen_action.item()
+    if q_vals.ndim == 1:
+        chosen_action = chosen_action.item()
+    else:
+        chosen_action = tuple(i.item() for i in chosen_action)
 
     return chosen_action
 
 
-def learner_step(batch, gamma, q_network, target_network, optimizer, optimizer_state, 
-    loss_fn) -> tuple[eqx.Module, jnp.ndarray, optax.OptState, optax.GradientTransformation]:
+@eqx.filter_jit
+def learner_step(batch, gamma, q_network, target_network, optimizer, optimizer_state,
+    loss_fn) -> tuple[eqx.Module, Array, optax.OptState]:
     loss, grads = jax.value_and_grad(loss_fn)(q_network, target_network, gamma, batch)
     updates, optimizer_state = optimizer.update(grads, optimizer_state, q_network)
     q_network = optax.apply_updates(q_network, updates)
@@ -144,8 +128,8 @@ def learner_step(batch, gamma, q_network, target_network, optimizer, optimizer_s
     return q_network, loss, optimizer_state, optimizer
 
 
-def train_dqn(env, replay_buffer: ReplayBuffer, epsilon_scheduler: callable, 
-    target_update_freq: int, gamma: float, q_network: eqx.Module, 
+def train_dqn(env, replay_buffer: ReplayBuffer, epsilon_scheduler: callable,
+    target_update_freq: int, gamma: float, q_network: eqx.Module,
     target_network: eqx.Module, optimizer: optax.GradientTransformation,
     optimizer_state, num_steps: int, loss_fn, key) -> eqx.Module:
     '''
