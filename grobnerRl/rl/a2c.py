@@ -74,13 +74,16 @@ def policy_loss(policy, critic, gamma, batch):
     return loss
 
 
-def select_action_policy(policy: eqx.Module, obs: Array, key: Array) -> int:
+def select_action_policy(policy: eqx.Module, obs: Array, key: Array) -> int|tuple[int, ...]:
     probs = policy(obs)
-    n = probs.shape[-1]
-    action = jax.random.choice(key, n, p=probs)
-    action = action.item()
+    probs_flat = jnp.reshape(probs, -1)
+    action = jax.random.choice(key, probs_flat.shape[0], p=probs_flat)
 
-    return action
+    if probs.ndim > 1:
+        action = jnp.unravel_index(action, probs.shape)
+        return tuple(i.item() for i in action)
+    else:
+        return action.item()
 
 
 def collect_transitions(env, replay_buffer, policy, n_steps, key, scores, episode_score, obs):
@@ -103,7 +106,7 @@ def collect_transitions(env, replay_buffer, policy, n_steps, key, scores, episod
     return env, replay_buffer, policy, key, scores, episode_score, obs
 
 
-def train_a2c(env, replay_buffer: TransitionSet, policy: eqx.Module, critic: eqx.Module,
+def train_a2c(env, policy: eqx.Module, critic: eqx.Module,
     optimizer_policy, optimizer_policy_state, optimizer_critic, optimizer_critic_state,
     gamma: float, num_episodes: int, n_steps: int, key) -> tuple[eqx.Module, eqx.Module, list[float], list[tuple[float, float]]]:
     '''
@@ -134,6 +137,7 @@ def train_a2c(env, replay_buffer: TransitionSet, policy: eqx.Module, critic: eqx
             - scores: List of episode scores achieved during training
             - losses: List of tuples containing (actor_loss, critic_loss) for each episode
     '''
+    replay_buffer = TransitionSet(n_steps)
     scores = []
     losses = []
 

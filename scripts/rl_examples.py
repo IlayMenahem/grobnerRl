@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import equinox as eqx
 import optax
 import gymnasium as gym
-from grobnerRl.rl.a2c import train_a2c, TransitionSet
+from grobnerRl.rl.a2c import train_a2c
 from grobnerRl.rl.dqn import train_dqn, ReplayBuffer, dqn_loss
 
 class agent(eqx.Module):
@@ -49,14 +49,13 @@ class policy(eqx.Module):
         return probs
 
 def a2c_example():
-    num_episodes = 100
-    n_steps = 1024
+    num_episodes = 2500
+    n_steps = 32
     gamma = 0.99
     seed = 0
     key = jax.random.key(seed)
 
     env = gym.make('CartPole-v1', max_episode_steps=500)
-    replay_buffer = TransitionSet(n_steps)
     actor = policy(4, 2, key)
     critic = agent(4, 1, key)
 
@@ -65,9 +64,9 @@ def a2c_example():
     optimizer_critic = optax.adam(3e-4)
     optimizer_critic_state = optimizer_critic.init(critic)
 
-    actor, critic, scores, losses = train_a2c(env, replay_buffer, actor, critic,
-        optimizer_policy, optimizer_policy_state, optimizer_critic, optimizer_critic_state,
-        gamma, num_episodes, n_steps, key)
+    actor, critic, scores, losses = train_a2c(env, actor, critic, optimizer_policy,
+        optimizer_policy_state, optimizer_critic, optimizer_critic_state, gamma,
+        num_episodes, n_steps, key)
 
     env.close()
 
