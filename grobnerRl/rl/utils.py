@@ -111,7 +111,7 @@ def plot_learning_process(scores: list[float], vals1: list[float], vals2: list[f
 
     plt.figure(figsize=(20, 5))
     plt.subplot(131)
-    plt.title(f'score: {smoothed_scores[-1] if scores else 0:.2f}')
+    plt.title(f'avg score: {np.mean(scores[-100:])}')
     plt.plot(smoothed_scores)
     plt.xlabel("Episode")
     plt.ylabel("Score")

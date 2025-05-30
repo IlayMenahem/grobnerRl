@@ -81,7 +81,7 @@ def compare_agents(strategy1: str, strategy2: str, num_episodes: int, *ideal_par
     plot_pdf(step_diffs, f'{strategy1}_vs_{strategy2}')
 
 
-def benchmark_agent_env(stratgy, ideal_dist, num_episodes: int):
+def benchmark_agent_env(stratgy, ideal_dist, num_episodes: int, folder='figs'):
     env = BuchbergerEnv(ideal_dist=ideal_dist)
     agent = BuchbergerAgent(stratgy)
 
@@ -99,7 +99,7 @@ def benchmark_agent_env(stratgy, ideal_dist, num_episodes: int):
 
         reward_counts.append(reward_sum)
 
-    plot_pdf(reward_counts, f'{stratgy}_{ideal_dist}_rewards')
+    plot_pdf(reward_counts, os.path.join(folder, f'{stratgy}_{ideal_dist}'))
 
 def display_obs(obs: tuple[list, list]) -> None:
     """
