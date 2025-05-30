@@ -24,6 +24,7 @@ class agent(eqx.Module):
         self.state_value = eqx.nn.Linear(32, 1, key=key5)
         self.advantage = eqx.nn.Linear(32, output_size, key=key6)
 
+    @eqx.filter_jit
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         x = jax.nn.relu(self.linear1(x))
         x = jax.nn.relu(self.linear2(x))
@@ -42,6 +43,7 @@ class policy(eqx.Module):
     def __init__(self, input_size: int, output_size: int, key):
         self.value = agent(input_size, output_size, key)
 
+    @eqx.filter_jit
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         vals = self.value(x)
         probs = jax.nn.softmax(vals)
@@ -50,7 +52,7 @@ class policy(eqx.Module):
 
 def a2c_example():
     num_episodes = 2500
-    n_steps = 32
+    n_steps = 256
     gamma = 0.99
     seed = 0
     key = jax.random.key(seed)

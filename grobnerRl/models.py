@@ -202,6 +202,7 @@ class GrobnerPolicy(eqx.Module):
     def __init__(self, groebner_model: GrobnerExtractor):
         self.model = groebner_model
 
+    @eqx.filter_jit
     def __call__(self, obs: GroebnerState) -> Array:
         vals = self.model(obs.ideal)
         vals = mask_selectables(vals, obs.selectables, -jnp.inf)
