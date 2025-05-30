@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from grobnerRl.envs.ideals import random_ideal
 from grobnerRl.Buchberger.BuchbergerIlay import buchberger
+from grobnerRl.envs.deepgroebner import BuchbergerEnv, BuchbergerAgent
 from grobnerRl.benchmark.optimalReductions import optimal_reductions
 from typing import Optional
 
@@ -80,6 +81,26 @@ def compare_agents(strategy1: str, strategy2: str, num_episodes: int, *ideal_par
     plot_pdf(step_diffs, f'{strategy1}_vs_{strategy2}')
 
 
+def benchmark_agent_env(stratgy, ideal_dist, num_episodes: int):
+    env = BuchbergerEnv(ideal_dist=ideal_dist)
+    agent = BuchbergerAgent(stratgy)
+
+    reward_counts: list[float] = []
+    for _ in range(num_episodes):
+        obs, _ = env.reset()
+        done = False
+        reward_sum: float = 0.0
+
+        while not done:
+            action = agent.act(obs)
+            obs, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            reward_sum += reward
+
+        reward_counts.append(reward_sum)
+
+    plot_pdf(reward_counts, f'{stratgy}_{ideal_dist}_rewards')
+
 def display_obs(obs: tuple[list, list]) -> None:
     """
     Prints the components of an observation (ideal and selectables).
@@ -100,7 +121,7 @@ def display_obs(obs: tuple[list, list]) -> None:
         print(selectable)
 
 
-def plot_pdf(step_counts: list[int], strategy_name: str) -> None:
+def plot_pdf(step_counts: list, strategy_name: str) -> None:
     """
     Plots and saves a probability density function (histogram) of step counts.
 

@@ -150,7 +150,7 @@ def experiment(num_episodes: int, step_limit: int, *ideal_params) -> float:
         print('num_steps', num_steps)
 
         if not basis:
-            print('fucking shit')
+            print('רע')
             continue
 
         print('basis', len(basis))
