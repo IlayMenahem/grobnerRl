@@ -1,5 +1,4 @@
 import jax
-import jax.numpy as jnp
 import equinox as eqx
 import optax
 
@@ -9,7 +8,7 @@ from grobnerRl.rl.a2c import train_a2c
 
 if __name__ == "__main__":
     num_episodes = 1000
-    n_steps = 2
+    n_steps = 64
     gamma = 0.99
     seed = 0
 
@@ -20,9 +19,9 @@ if __name__ == "__main__":
     env = BuchbergerEnv('2-3-3-uniform', mode='jax')
 
     optimizer_policy = optax.adam(1e-3)
-    optimizer_policy_state = optimizer_policy.init(eqx.filter(policy, eqx.is_array))
+    optimizer_policy_state = optimizer_policy.init(policy)
     optimizer_critic = optax.adam(1e-3)
-    optimizer_critic_state = optimizer_critic.init(eqx.filter(critic, eqx.is_array))
+    optimizer_critic_state = optimizer_critic.init(critic)
 
     train_a2c(env, policy, critic, optimizer_policy, optimizer_policy_state,
             optimizer_critic, optimizer_critic_state, gamma, num_episodes, n_steps, key)

@@ -137,6 +137,13 @@ def tokenize(ideal: Sequence[PolyElement]) -> Array:
     return tokenized_ideal
 
 
+def make_obs(G, P):
+    G = tokenize(G)
+    P = jnp.array(P)
+    obs = GroebnerState(G, P)
+    return obs
+
+
 class GrobnerExtractor(eqx.Module):
     monomial_model: EmbeddingMonomials
     polynomial_model: TransformerEmbedder
@@ -161,6 +168,7 @@ class GrobnerExtractor(eqx.Module):
         self.polynomial_model = TransformerEmbedder(monoms_embedding_dim, polys_embedding_dim, polys_depth, polys_num_heads, key2)
         self.ideal_model = Transformer(polys_embedding_dim, ideal_depth, ideal_num_heads, key3)
 
+    @eqx.filter_jit
     def __call__(self, ideal) -> Array:
         '''
         scores each pair of polynomials to select to reduce in buchberger's algorithm
@@ -180,6 +188,7 @@ class GrobnerExtractor(eqx.Module):
         return values
 
 
+@eqx.filter_jit
 def mask_selectables(values, selectables, masking_value):
     mask = jnp.zeros_like(values)
     mask = mask.at[tuple(zip(*selectables))].set(1)

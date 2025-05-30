@@ -5,11 +5,9 @@ credit to the authors of the deepgroebner paper
 """
 
 import bisect
-import jax.numpy as jnp
 import numpy as np
 
-from grobnerRl.models import tokenize
-from grobnerRl.rl.utils import GroebnerState
+from grobnerRl.models import make_obs
 from grobnerRl.envs.ideals import IdealGenerator, parse_ideal_dist
 
 
@@ -483,9 +481,3 @@ class BuchbergerEnv:
             return ideal_dist
         else:
             return parse_ideal_dist(ideal_dist)
-
-def make_obs(G, P):
-    G = tokenize(G)
-    P = jnp.array(P)
-    obs = GroebnerState(G, P)
-    return obs
