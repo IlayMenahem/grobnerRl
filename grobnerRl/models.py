@@ -137,14 +137,13 @@ def tokenize(ideal: Sequence[PolyElement]) -> Array:
     return tokenized_ideal
 
 
-class GrobnerModel(eqx.Module):
-    masking_value: float = eqx.field(static=True)
+class GrobnerExtractor(eqx.Module):
     monomial_model: EmbeddingMonomials
     polynomial_model: TransformerEmbedder
     ideal_model: Transformer
 
     def __init__(self, vars_limit: int, monoms_embedding_dim: int, polys_embedding_dim: int, polys_depth: int,
-        polys_num_heads: int, ideal_depth: int, ideal_num_heads: int, masking_value: float, key):
+        polys_num_heads: int, ideal_depth: int, ideal_num_heads: int, key):
         '''
         Args:
         - vars_limit: int - The maximum number of variables in the polynomial ring
@@ -154,7 +153,6 @@ class GrobnerModel(eqx.Module):
         - polys_num_heads: int - The number of attention heads in the transformer model for polynomials
         - ideal_depth: int - The depth of the transformer model for ideals
         - ideal_num_heads: int - The number of attention heads in the transformer model for ideals
-        - masking_value: int - The value used for masking in the transformer model
         - key: jax.random.PRNGKey - The random key for initialization
         '''
         key1, key2, key3 = jax.random.split(key, 3)
@@ -163,49 +161,54 @@ class GrobnerModel(eqx.Module):
         self.polynomial_model = TransformerEmbedder(monoms_embedding_dim, polys_embedding_dim, polys_depth, polys_num_heads, key2)
         self.ideal_model = Transformer(polys_embedding_dim, ideal_depth, ideal_num_heads, key3)
 
-        self.masking_value = masking_value
-
-    def __call__(self, obs: GroebnerState) -> Array:
+    def __call__(self, ideal) -> Array:
         '''
         scores each pair of polynomials to select to reduce in buchberger's algorithm
 
         Args:
-        obs: GroebnerState
         - ideal: Array - The ideal generators
-        - selectables: Array - The pairs of polynomials that can be selected
 
         Returns:
         2d Array of scores for selecting a polynomial pair
         '''
-        ideal: Array = obs.ideal
-        selectables: Array = obs.selectables
-
         monomial_embeddings: Array = vmap(self.monomial_model)(ideal)
         polynomial_embeddings: Array = vmap(self.polynomial_model)(monomial_embeddings)
 
         polynomial_arrays = self.ideal_model(polynomial_embeddings)
         values = jnp.matmul(polynomial_arrays, polynomial_arrays.T)
 
-        # mask the values that are not in selectables
-        mask = jnp.zeros_like(values)
-        mask = mask.at[tuple(zip(*selectables))].set(1)
-
-        values = jnp.where(mask == 1, values, self.masking_value)
-
         return values
 
 
+def mask_selectables(values, selectables, masking_value):
+    mask = jnp.zeros_like(values)
+    mask = mask.at[tuple(zip(*selectables))].set(1)
+    values = jnp.where(mask == 1, values, masking_value)
+    return values
+
+
 class GrobnerPolicy(eqx.Module):
-    model: GrobnerModel
+    model: GrobnerExtractor
 
-    def __init__(self, groebner_model: GrobnerModel):
-        if groebner_model.masking_value != -jnp.inf:
-            raise ValueError("GrobnerModel masking_value must be -jnp.inf for proper masking in the policy")
-
+    def __init__(self, groebner_model: GrobnerExtractor):
         self.model = groebner_model
 
     def __call__(self, obs: GroebnerState) -> Array:
-        vals = self.model(obs)
+        vals = self.model(obs.ideal)
+        vals = mask_selectables(vals, obs.selectables, -jnp.inf)
         probs = jax.nn.softmax(vals, axis=None)
 
         return probs
+
+
+class GrobnerCritic(eqx.Module):
+    model: GrobnerExtractor
+
+    def __init__(self, groebner_model: GrobnerExtractor):
+        self.model = groebner_model
+
+    def __call__(self, obs: GroebnerState) -> Array:
+        vals = self.model(obs.ideal)
+        value = jnp.mean(vals)
+
+        return value

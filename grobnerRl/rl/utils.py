@@ -1,7 +1,6 @@
 import os
 import equinox as eqx
 import optax
-from jax import value_and_grad
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import scipy
@@ -29,12 +28,11 @@ def select_action_inference(dqn: eqx.Module, obs: Array) -> tuple[int, ...]:
     return chosen_action
 
 
-@eqx.filter_jit
 def update_network(network: eqx.Module, optimizer: optax.GradientTransformation, optimizer_state: optax.OptState,
     loss_fn: callable, *loss_args) -> tuple[eqx.Module, float, optax.OptState]:
-    loss, grads = value_and_grad(loss_fn)(network, *loss_args)
+    loss, grads = eqx.filter_value_and_grad(loss_fn, allow_int=True)(network, *loss_args)
     updates, optimizer_state = optimizer.update(grads, optimizer_state)
-    network = optax.apply_updates(network, updates)
+    network = eqx.apply_updates(network, updates)
 
     return network, loss, optimizer_state
 
@@ -42,7 +40,7 @@ def update_network(network: eqx.Module, optimizer: optax.GradientTransformation,
 @dataclass(frozen=True)
 class GroebnerState:
     ideal: Array
-    selectables: Array
+    selectables: list[tuple]
 
 
 @dataclass(frozen=True)

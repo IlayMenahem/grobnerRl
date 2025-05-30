@@ -1,6 +1,5 @@
 from collections import deque
 import jax
-from jax import jit
 import jax.numpy as jnp
 from tqdm import tqdm
 import equinox as eqx
@@ -22,7 +21,7 @@ class TransitionSet:
 
     def sample_and_clear(self) -> tuple[list,...]:
         res = ([t.obs for t in self.queue],
-            [jnp.array(t.action) for t in self.queue],
+            [t.action for t in self.queue],
             [jnp.array(t.reward) for t in self.queue],
             [t.next_obs for t in self.queue],
             [jnp.array(t.done) for t in self.queue])
@@ -31,7 +30,6 @@ class TransitionSet:
         return res
 
 
-@jit
 def compute_advantage(critic, reward, gamma, state, next_state, done):
     value = critic(state)
     next_value = critic(next_state)
@@ -45,14 +43,13 @@ def compute_advantage(critic, reward, gamma, state, next_state, done):
 def advantage_loss(critic: eqx.Module, gamma: float, batch: tuple):
     state, _, reward, next_state, done = batch
 
-    @jit
     def advantage_loss_fn(reward, state, next_state, done):
         advantage = compute_advantage(critic, reward, gamma, state, next_state, done)
         loss = advantage**2
 
         return loss
 
-    loss = jax.tree.map(advantage_loss_fn, reward, state, next_state, done)
+    loss = jax.tree.map(advantage_loss_fn, reward, state, next_state, done, is_leaf=lambda x: not isinstance(x, list))
     loss = jnp.mean(jnp.array(loss))
 
     return loss
@@ -61,14 +58,13 @@ def advantage_loss(critic: eqx.Module, gamma: float, batch: tuple):
 def policy_loss(policy, critic, gamma, batch):
     states, actions, rewards, next_states, done = batch
 
-    @jit
-    def policy_loss_fn(action, state, next_state, reward, done):
+    def policy_loss_fn(reward, action, state, next_state, done):
         advantage = compute_advantage(critic, reward, gamma, state, next_state, done)
         log_prob = jnp.log(policy(state)[action])
 
         return -log_prob * advantage
 
-    loss = jax.tree.map(policy_loss_fn, actions, states, next_states, rewards, done)
+    loss = jax.tree.map(policy_loss_fn, rewards, actions, states, next_states, done, is_leaf=lambda x: not isinstance(x, list))
     loss = jnp.mean(jnp.array(loss))
 
     return loss
