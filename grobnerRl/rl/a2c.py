@@ -3,9 +3,8 @@ import jax
 import jax.numpy as jnp
 from tqdm import tqdm
 import equinox as eqx
-from chex import Array
 
-from grobnerRl.rl.utils import TimeStep, GroebnerState, update_network, plot_learning_process
+from grobnerRl.rl.utils import TimeStep, GroebnerState, update_network, plot_learning_process, select_action_policy
 
 
 class TransitionSet:
@@ -70,18 +69,6 @@ def policy_loss(policy, critic, gamma, batch):
     return loss
 
 
-def select_action_policy(policy: eqx.Module, obs: Array, key: Array) -> int|tuple[int, ...]:
-    probs = policy(obs)
-    probs_flat = jnp.reshape(probs, -1)
-    action = jax.random.choice(key, probs_flat.shape[0], p=probs_flat)
-
-    if probs.ndim > 1:
-        action = jnp.unravel_index(action, probs.shape)
-        return tuple(i.item() for i in action)
-    else:
-        return action.item()
-
-
 def collect_transitions(env, replay_buffer, policy, n_steps, key, scores, episode_score, obs):
     for step in range(n_steps):
         key, subkey = jax.random.split(key)
@@ -102,8 +89,7 @@ def collect_transitions(env, replay_buffer, policy, n_steps, key, scores, episod
     return env, replay_buffer, policy, key, scores, episode_score, obs
 
 
-def train_a2c(env, policy: eqx.Module, critic: eqx.Module,
-    optimizer_policy, optimizer_policy_state, optimizer_critic, optimizer_critic_state,
+def train_a2c(env, policy: eqx.Module, critic: eqx.Module, optimizer_policy, optimizer_critic,
     gamma: float, num_episodes: int, n_steps: int, key) -> tuple[eqx.Module, eqx.Module, list[float], list[tuple[float, float]]]:
     '''
     Train an Advantage Actor-Critic (A2C) agent.
@@ -118,9 +104,7 @@ def train_a2c(env, policy: eqx.Module, critic: eqx.Module,
         policy: The actor network (policy) as an Equinox module
         critic: The critic network (value function) as an Equinox module
         optimizer_policy: Optax optimizer for the policy network
-        optimizer_policy_state: State of the policy optimizer
         optimizer_critic: Optax optimizer for the critic network
-        optimizer_critic_state: State of the critic optimizer
         gamma: Discount factor for future rewards (0 < gamma <= 1)
         num_episodes: Number of training episodes to run
         n_steps: Number of environment steps to collect per episode before updating
@@ -134,6 +118,9 @@ def train_a2c(env, policy: eqx.Module, critic: eqx.Module,
             - losses: List of tuples containing (actor_loss, critic_loss) for each episode
     '''
     replay_buffer = TransitionSet(n_steps)
+    optimizer_critic_state = optimizer_critic.init(critic)
+    optimizer_policy_state = optimizer_policy.init(policy)
+
     scores = []
     losses = []
 

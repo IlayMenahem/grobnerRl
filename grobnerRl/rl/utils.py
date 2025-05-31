@@ -1,6 +1,7 @@
 import os
 import equinox as eqx
 import optax
+import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import scipy
@@ -26,6 +27,18 @@ def select_action_inference(dqn: eqx.Module, obs: Array) -> tuple[int, ...]:
     chosen_action = tuple(i.item() for i in chosen_action)
 
     return chosen_action
+
+
+def select_action_policy(policy: eqx.Module, obs: Array, key: Array) -> int|tuple[int, ...]:
+    probs = policy(obs)
+    probs_flat = jnp.reshape(probs, -1)
+    action = jax.random.choice(key, probs_flat.shape[0], p=probs_flat)
+
+    if probs.ndim > 1:
+        action = jnp.unravel_index(action, probs.shape)
+        return tuple(i.item() for i in action)
+    else:
+        return action.item()
 
 
 def update_network(network: eqx.Module, optimizer: optax.GradientTransformation, optimizer_state: optax.OptState,

@@ -200,7 +200,7 @@ class GrobnerPolicy(eqx.Module):
     model: GrobnerExtractor
 
     def __init__(self, groebner_model: GrobnerExtractor):
-        self.model = groebner_model
+        self.model = eqx.nn.inference_mode(groebner_model)
 
     def __call__(self, obs: GroebnerState) -> Array:
         vals = self.model(obs.ideal)
@@ -214,7 +214,7 @@ class GrobnerCritic(eqx.Module):
     model: GrobnerExtractor
 
     def __init__(self, groebner_model: GrobnerExtractor):
-        self.model = groebner_model
+        self.model = eqx.nn.inference_mode(groebner_model)
 
     def __call__(self, obs: GroebnerState) -> Array:
         vals = self.model(obs.ideal)
