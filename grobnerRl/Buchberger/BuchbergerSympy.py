@@ -1,5 +1,3 @@
-from sympy.polys.domains import RR
-from sympy.polys.orderings import lex
 from sympy.polys.polyerrors import DomainError
 from sympy.polys.monomials import monomial_mul, monomial_lcm, monomial_divides, term_div
 from sympy.polys.groebnertools import spoly, red_groebner
