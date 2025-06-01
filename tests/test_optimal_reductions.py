@@ -319,9 +319,8 @@ class TestExperiment:
 
     def test_experiment_zero_episodes(self):
         """Test experiment with zero episodes."""
-        # The function has a division by zero bug, so we expect it to fail
         with pytest.raises(ZeroDivisionError):
-            success_rate = experiment(0, 10, 2, 2, 2, 2, QQ, lex)
+            _ = experiment(0, 10, 2, 2, 2, 2, QQ, lex)
 
 
 class TestOptimalReductionsIntegration:
@@ -517,7 +516,7 @@ def test_simple_demonstration():
         if improvement > 0:
             print(f"\n✅ IMPROVEMENT: Optimal algorithm used {improvement} fewer reductions!")
         elif improvement == 0:
-            print(f"\n✅ EQUAL: Both algorithms used the same number of reductions.")
+            print("\n✅ EQUAL: Both algorithms used the same number of reductions.")
         else:
             print(f"\n❌ WORSE: Optimal algorithm used {-improvement} more reductions.")
 

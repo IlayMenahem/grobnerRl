@@ -4,7 +4,7 @@ import pytest
 import sympy as sp
 
 from grobnerRl.envs.deepgroebner import (spoly, reduce, select, update, minimalize, interreduce,
-                                         buchberger, BuchbergerEnv, BuchbergerAgent, make_obs)
+                                         buchberger, BuchbergerEnv, BuchbergerAgent)
 from grobnerRl.envs.ideals import FixedIdealGenerator
 
 
