@@ -6,6 +6,8 @@ credit to the authors of the deepgroebner paper
 
 import bisect
 import numpy as np
+import gymnasium as gym
+from gymnasium import spaces
 
 from grobnerRl.models import make_obs
 from grobnerRl.envs.ideals import IdealGenerator, parse_ideal_dist
@@ -309,13 +311,20 @@ class BuchbergerAgent:
         return select(G, P, strategy=self.strategy)
 
 
-class BuchbergerEnv:
-    """An environment for computing a Groebner basis using Buchberger's algorithm.
+class BuchbergerEnv(gym.Env):
+    """A Gymnasium environment for computing Groebner bases using Buchberger's algorithm.
+
+    This environment provides a reinforcement learning interface for the Groebner basis
+    computation problem. At each step, the agent selects a pair of polynomials to
+    reduce, and the environment returns the updated state and a reward.
 
     Parameters
     ----------
     ideal_dist : str or IdealGenerator, optional
         IdealGenerator or string naming the ideal distribution.
+    mode : {'jax', 'game'}, optional
+        Mode for observation format. 'jax' returns structured observations,
+        'game' returns raw polynomial lists.
     elimination : {'gebauermoeller', 'lcm', 'none'}, optional
         Strategy for pair elimination.
     rewards : {'additions', 'reductions'}, optional
@@ -400,8 +409,19 @@ class BuchbergerEnv:
         self.sort_input = sort_input
         self.sort_reducers = sort_reducers
 
-    def reset(self):
+        num_vars = self.ideal_gen.ring.ngens
+
+        self.action_space = spaces.Box(low=0, high=np.inf, shape=(2,), dtype=np.int32)
+        self.observation_space = spaces.Tuple(
+            (spaces.Sequence(spaces.Sequence(spaces.Box(low=0, high=np.inf, shape=(num_vars, ), dtype=np.int32))),
+            spaces.Sequence(spaces.Box(low=0, high=np.inf, shape=(2,), dtype=np.int32)))
+        )
+
+    def reset(self, seed=None, options=None):
         """Initialize the polynomial list and pair list for a new Groebner basis computation."""
+        if seed is not None:
+            self.seed(seed)
+
         F = next(self.ideal_gen)
         self.order = F[0].ring.order
         if self.sort_input:
