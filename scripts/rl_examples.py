@@ -34,7 +34,7 @@ class agent(eqx.Module):
 
         q_values = state_value + (advantage - jnp.mean(advantage, axis=-1, keepdims=True))
 
-        return q_values
+        return advantage
 
 
 class policy(eqx.Module):
@@ -51,7 +51,7 @@ class policy(eqx.Module):
         return probs
 
 def a2c_example():
-    num_episodes = 2500
+    num_episodes = 1000
     n_steps = 256
     gamma = 0.99
     seed = 0
@@ -62,13 +62,10 @@ def a2c_example():
     critic = agent(4, 1, key)
 
     optimizer_policy = optax.adam(1e-4)
-    optimizer_policy_state = optimizer_policy.init(actor)
     optimizer_critic = optax.adam(3e-4)
-    optimizer_critic_state = optimizer_critic.init(critic)
 
     actor, critic, scores, losses = train_a2c(env, actor, critic, optimizer_policy,
-        optimizer_policy_state, optimizer_critic, optimizer_critic_state, gamma,
-        num_episodes, n_steps, key)
+        optimizer_critic, gamma, num_episodes, n_steps, key)
 
     env.close()
 

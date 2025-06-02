@@ -1,6 +1,7 @@
 from collections import deque
 import jax
 import jax.numpy as jnp
+import optax
 from tqdm import tqdm
 import equinox as eqx
 
@@ -29,39 +30,44 @@ class TransitionSet:
         return res
 
 
-def compute_advantage(critic, reward, gamma, state, next_state, done):
-    value = critic(state)
-    next_value = critic(next_state)
-
-    target = reward + gamma * next_value * (1 - done)
-    advantage = target - value
-
-    return advantage
-
-
-def advantage_loss(critic: eqx.Module, gamma: float, batch: tuple):
+def value_loss(critic: eqx.Module, gamma: float, batch: tuple):
     state, _, reward, next_state, done = batch
 
-    def advantage_loss_fn(reward, state, next_state, done):
-        advantage = compute_advantage(critic, reward, gamma, state, next_state, done)
-        loss = advantage**2
+    def value_loss_fn(reward, state, next_state, done):
+        value = critic(state)
+        next_value = critic(next_state)
+
+        target = reward + gamma * next_value * (1 - done)
+
+        loss = optax.huber_loss(value, target, delta=1.0)
 
         return loss
 
-    loss = jax.tree.map(advantage_loss_fn, reward, state, next_state, done, is_leaf=lambda x: not isinstance(x, list))
+    loss = jax.tree.map(value_loss_fn, reward, state, next_state, done, is_leaf=lambda x: not isinstance(x, list))
     loss = jnp.mean(jnp.array(loss))
 
     return loss
 
 
-def policy_loss(policy, critic, gamma, batch):
+def policy_loss(policy, critic, gamma, batch, entropy_coeff):
     states, actions, rewards, next_states, done = batch
 
     def policy_loss_fn(reward, action, state, next_state, done):
-        advantage = compute_advantage(critic, reward, gamma, state, next_state, done)
-        log_prob = jnp.log(policy(state)[action])
+        value = critic(state)
+        next_value = critic(next_state)
 
-        return -log_prob * advantage
+        target = reward + gamma * next_value * (1 - done)
+        advantage = jax.lax.stop_gradient(target - value)
+
+        action_probs = policy(state)
+        log_prob = jnp.log(action_probs[action])
+
+        policy_loss_val = -log_prob * advantage
+        entropy = -jnp.sum(action_probs * jnp.log(action_probs + 1e-8))
+
+        loss = policy_loss_val - entropy_coeff * entropy
+
+        return loss
 
     loss = jax.tree.map(policy_loss_fn, rewards, actions, states, next_states, done, is_leaf=lambda x: not isinstance(x, list))
     loss = jnp.mean(jnp.array(loss))
@@ -82,6 +88,7 @@ def collect_transitions(env, replay_buffer, policy, n_steps, key, scores, episod
         obs = next_obs
 
         if done:
+            print(f"Episode score: {episode_score}")
             obs, _ = env.reset()
             scores.append(episode_score)
             episode_score = 0.0
@@ -90,7 +97,7 @@ def collect_transitions(env, replay_buffer, policy, n_steps, key, scores, episod
 
 
 def train_a2c(env, policy: eqx.Module, critic: eqx.Module, optimizer_policy, optimizer_critic,
-    gamma: float, num_episodes: int, n_steps: int, key) -> tuple[eqx.Module, eqx.Module, list[float], list[tuple[float, float]]]:
+    gamma: float, num_episodes: int, n_steps: int, key, entropy_coeff: float = 0.01) -> tuple[eqx.Module, eqx.Module, list[float], list[tuple[float, float]]]:
     '''
     Train an Advantage Actor-Critic (A2C) agent.
 
@@ -100,7 +107,6 @@ def train_a2c(env, policy: eqx.Module, critic: eqx.Module, optimizer_policy, opt
 
     Args:
         env: The environment to train on
-        replay_buffer: TransitionSet buffer to store and sample experience transitions
         policy: The actor network (policy) as an Equinox module
         critic: The critic network (value function) as an Equinox module
         optimizer_policy: Optax optimizer for the policy network
@@ -109,6 +115,7 @@ def train_a2c(env, policy: eqx.Module, critic: eqx.Module, optimizer_policy, opt
         num_episodes: Number of training episodes to run
         n_steps: Number of environment steps to collect per episode before updating
         key: JAX random key for stochastic operations
+        entropy_coeff: Coefficient for entropy regularization (default: 0.01)
 
     Returns:
         tuple containing:
@@ -132,8 +139,9 @@ def train_a2c(env, policy: eqx.Module, critic: eqx.Module, optimizer_policy, opt
         env, replay_buffer, policy, key, scores, episode_score, obs = collect_transitions(env, replay_buffer, policy, n_steps, key, scores, episode_score, obs)
 
         batch = replay_buffer.sample_and_clear()
-        policy, actor_loss, optimizer_policy_state = update_network(policy, optimizer_policy, optimizer_policy_state, policy_loss, critic, gamma, batch)
-        critic, critic_loss, optimizer_critic_state = update_network(critic, optimizer_critic, optimizer_critic_state, advantage_loss, gamma, batch)
+
+        policy, actor_loss, optimizer_policy_state = update_network(policy, optimizer_policy, optimizer_policy_state, policy_loss, critic, gamma, batch, entropy_coeff)
+        critic, critic_loss, optimizer_critic_state = update_network(critic, optimizer_critic, optimizer_critic_state, value_loss, gamma, batch)
 
         losses.append((actor_loss, critic_loss))
         progress_bar.set_postfix(loss=actor_loss, critic_loss=critic_loss)
