@@ -119,13 +119,14 @@ def plot_learning_process(scores: list[float], vals1: list[float], vals2: list[f
     Returns:
     None
     '''
-    smoothing_length_scores = 5
-    smoothed_scores = scipy.signal.convolve(scores, np.ones(smoothing_length_scores) / smoothing_length_scores, mode='valid')
 
     plt.figure(figsize=(20, 5))
     plt.subplot(131)
-    plt.title(f'avg score: {np.mean(scores[-100:])}')
-    plt.plot(smoothed_scores)
+    window = 50
+    plt.plot(scores)
+    if len(scores) >= window:
+        running_avg = [sum(scores[max(0, i - window):i]) / window for i in range(len(scores))]
+        plt.plot(running_avg, label=f'Running Avg (window={window})')
     plt.xlabel("Episode")
     plt.ylabel("Score")
     plt.grid(True)
