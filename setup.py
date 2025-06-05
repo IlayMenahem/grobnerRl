@@ -20,7 +20,9 @@ setup(
         'numpy',
         'matplotlib',
         'sympy',
-        'scipy'
+        'torch',
+        'torchvision',
+        'torchaudio'
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
