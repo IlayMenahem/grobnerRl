@@ -5,20 +5,24 @@ from torch.distributions.categorical import Categorical
 from tqdm import tqdm
 
 
-def compute_gae(rewards, values, dones, gamma, gae_lambda):
+def compute_gae(rewards: list[float], values: list[float], dones: list[bool], gamma: float, gae_lambda: float) -> list[float]:
     advantages = []
     gae = 0
     values = values + [0]
+
     for step in reversed(range(len(rewards))):
         delta = rewards[step] + gamma * values[step + 1] * (1 - dones[step]) - values[step]
         gae = delta + gamma * gae_lambda * (1 - dones[step]) * gae
         advantages.insert(0, gae)
+
     return advantages
 
 
-def ppo_update(actor, critic, optimizer_actor, optimizer_critic, states, actions, old_log_probs, returns, advantages,
-               clip_epsilon, entropy_coeff, value_loss_coeff, clip_range_vf, max_grad_norm, target_kl):
-    states = torch.stack(states)
+def ppo_update(actor: nn.Module, critic: nn.Module, optimizer_actor: torch.optim.Optimizer,
+    optimizer_critic: torch.optim.Optimizer, states: list, actions: list, old_log_probs: list,
+    returns: list, advantages: list, clip_epsilon: float, entropy_coeff: float, value_loss_coeff: float,
+    clip_range_vf: float, max_grad_norm: float, target_kl: float) -> tuple[float, float, float, float]:
+
     actions = torch.tensor(actions)
     old_log_probs = torch.tensor(old_log_probs)
     returns = torch.tensor(returns)
@@ -53,31 +57,31 @@ def ppo_update(actor, critic, optimizer_actor, optimizer_critic, states, actions
     optimizer_critic.step()
 
     approx_kl = (old_log_probs - new_log_probs).mean().item()
+
     return policy_loss.item(), value_loss.item(), entropy.item(), approx_kl
 
 
 
-def collect_trajectories(env, actor, batch_size, gamma):
+def collect_trajectories(env: gym.Env, actor: nn.Module, batch_size: int, gamma: float) -> tuple[list, list[int], list[float], list[bool], list[float], list[float], float]:
     states, actions, rewards, dones, log_probs, values = [], [], [], [], [], []
-    episode_rewards = []
-    ep_reward = 0
+    episode_rewards: list[float] = []
+    ep_reward: float = 0
 
     state, _ = env.reset()
-    done = False
+    done: bool = False
 
     pbar = tqdm(total=batch_size, desc="Collecting trajectories", leave=False)
     while len(states) < batch_size:
-        state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
-        logits = actor(state_tensor)
+        logits = actor(state)
         dist = Categorical(logits=logits)
         action = dist.sample()
-        log_prob = dist.log_prob(action).item()
-        value = critic(state_tensor).item()
+        log_prob: float = dist.log_prob(action).item()
+        value: float = critic(state).item()
 
         next_state, reward, terminated, truncated, _ = env.step(action.item())
         done = terminated or truncated
 
-        states.append(state_tensor.squeeze(0))
+        states.append(state)
         actions.append(action.item())
         rewards.append(reward)
         dones.append(done)
@@ -95,12 +99,16 @@ def collect_trajectories(env, actor, batch_size, gamma):
             done = False
 
     pbar.close()
-    avg_reward = sum(episode_rewards) / len(episode_rewards) if episode_rewards else 0
+    avg_reward: float = sum(episode_rewards) / len(episode_rewards) if episode_rewards else 0
+
     return states, actions, rewards, dones, log_probs, values, avg_reward
 
 
-def ppo(env: gym.Env, actor, critic, optimizer_actor, optimizer_critic, batch_size, num_epochs, gamma, clip_epsilon,
-        gae_lambda, entropy_coeff, value_loss_coeff, clip_range_vf, target_kl, max_grad_norm=0.5):
+def ppo(env: gym.Env, actor: nn.Module, critic: nn.Module, optimizer_actor: torch.optim.Optimizer,
+    optimizer_critic: torch.optim.Optimizer, batch_size: int, num_epochs: int, gamma: float,
+    clip_epsilon: float, gae_lambda: float, entropy_coeff: float, value_loss_coeff: float,
+    clip_range_vf: float, target_kl: float, max_grad_norm: float)-> tuple[nn.Module, nn.Module]:
+
     for epoch in tqdm(range(num_epochs), desc="PPO epochs"):
         states, actions, rewards, dones, old_log_probs, values, avg_reward = collect_trajectories(env, actor, batch_size, gamma)
         advantages = compute_gae(rewards, values, dones, gamma, gae_lambda)
@@ -116,6 +124,8 @@ def ppo(env: gym.Env, actor, critic, optimizer_actor, optimizer_critic, batch_si
             print(f"Early stopping at epoch {epoch + 1} due to reaching target KL")
             break
 
+    return actor, critic
+
 
 class Actor(nn.Module):
     def __init__(self, state_dim, action_dim):
@@ -125,8 +135,15 @@ class Actor(nn.Module):
         self.fc3 = nn.Linear(128, action_dim)
 
     def forward(self, x):
+        if isinstance(x, list):
+            return torch.stack([self.forward(torch.tensor(s, dtype=torch.float32)) for s in x])
+
+        if not isinstance(x, torch.Tensor):
+            x = torch.tensor(x, dtype=torch.float32)
+
         x = torch.tanh(self.fc1(x))
         x = torch.tanh(self.fc2(x))
+
         return self.fc3(x)
 
 
@@ -138,6 +155,12 @@ class Critic(nn.Module):
         self.fc3 = nn.Linear(128, 1)
 
     def forward(self, x):
+        if isinstance(x, list):
+            return torch.stack([self.forward(torch.tensor(s, dtype=torch.float32)) for s in x])
+
+        if not isinstance(x, torch.Tensor):
+            x = torch.tensor(x, dtype=torch.float32)
+
         x = torch.tanh(self.fc1(x))
         x = torch.tanh(self.fc2(x))
         return self.fc3(x)
@@ -153,20 +176,6 @@ if __name__ == "__main__":
     optimizer_actor = torch.optim.Adam(actor.parameters(), lr=3e-4)
     optimizer_critic = torch.optim.Adam(critic.parameters(), lr=1e-3)
 
-    ppo(
-        env=env,
-        actor=actor,
-        critic=critic,
-        optimizer_actor=optimizer_actor,
-        optimizer_critic=optimizer_critic,
-        batch_size=4096,
-        num_epochs=1000,
-        gamma=0.99,
-        clip_epsilon=0.2,
-        gae_lambda=0.95,
-        entropy_coeff=0.01,
-        value_loss_coeff=0.5,
-        clip_range_vf=0.2,
-        target_kl=0.03,
-        max_grad_norm=0.5,
-    )
+    ppo(env, actor, critic, optimizer_actor, optimizer_critic, 4096, 250,
+        gamma=0.99, clip_epsilon=0.2, gae_lambda=0.95, entropy_coeff=0.01,
+        value_loss_coeff=0.5, clip_range_vf=0.2, target_kl=0.03, max_grad_norm=0.5)
