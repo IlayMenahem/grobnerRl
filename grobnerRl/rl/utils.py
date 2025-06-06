@@ -52,7 +52,7 @@ def update_network(network: eqx.Module, optimizer: optax.GradientTransformation,
 
 @dataclass(frozen=True)
 class GroebnerState:
-    ideal: Array
+    ideal: list[np.ndarray]
     selectables: list[tuple]
 
 

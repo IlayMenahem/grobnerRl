@@ -4,13 +4,36 @@ An environment for computing Groebner bases with Buchberger's algorithm.
 credit to the authors of the deepgroebner paper
 """
 
+from sympy.polys.rings import PolyElement
+from typing import Sequence
 import bisect
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
-from grobnerRl.models import make_obs
 from grobnerRl.envs.ideals import IdealGenerator, parse_ideal_dist
+
+
+def tokenize(ideal: Sequence[PolyElement]) -> list[np.ndarray]:
+    '''
+    takes an ideal and returns a tokenized version of it, a list of arrays, each of the arrays
+    representing a polynomial monomials
+
+    Parameters:
+    ideal: list[PolyElement] - The ideal generators to be tokenized
+
+    Returns:
+    tokenized ideal
+    '''
+    polys_monomials = [np.array(poly.monoms()) for poly in ideal]
+
+    return polys_monomials
+
+
+def make_obs(G, P):
+    G = tokenize(G)
+
+    return G, P
 
 
 def spoly(f, g, lmf=None, lmg=None):
@@ -399,7 +422,7 @@ class BuchbergerEnv(gym.Env):
 
     def __init__(self, ideal_dist='3-20-10-uniform', mode='game', elimination='gebauermoeller',
                  rewards='additions', sort_input=False, sort_reducers=True):
-        if mode not in ['jax', 'game']:
+        if mode not in ['game', 'train']:
             raise ValueError('mode must be either jax or game')
 
         self.mode = mode
@@ -445,7 +468,7 @@ class BuchbergerEnv(gym.Env):
                 self.lmG_ = self.lmG
 
         obs = (self.G, self.P)
-        if self.mode == 'jax':
+        if self.mode == 'train':
             obs = make_obs(*obs)
 
         info = {}
@@ -453,7 +476,10 @@ class BuchbergerEnv(gym.Env):
         return obs, info if self.P else self.reset()
 
     def step(self, action):
-        """Perform one reduction and return the new polynomial list and pair list."""
+        if self.mode == 'train':
+            # convert int action to tuple
+            action = (action // len(self.G), action % len(self.G))
+
         i, j = action
         self.P.remove(action)
         s = spoly(self.G[i], self.G[j], lmf=self.lmG[i], lmg=self.lmG[j])
@@ -474,7 +500,7 @@ class BuchbergerEnv(gym.Env):
                 self.lmG_ = self.G_
 
         obs = (self.G, self.P)
-        if self.mode == 'jax':
+        if self.mode == 'train':
             obs = make_obs(*obs)
 
         reward = -(1.0 + stats['steps']) if self.rewards == 'additions' else -1.0

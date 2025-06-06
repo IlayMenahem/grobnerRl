@@ -1,10 +1,8 @@
-from typing import Sequence
 import equinox as eqx
 import jax
 from jax import vmap
 import jax.numpy as jnp
 from jaxtyping import Array
-from sympy.polys.rings import PolyElement
 
 from grobnerRl.rl.utils import GroebnerState
 
@@ -115,33 +113,6 @@ class TransformerEmbedder(eqx.Module):
         x = self.adaptor(x)
 
         return x
-
-
-def tokenize(ideal: Sequence[PolyElement]) -> Array:
-    '''
-    takes an ideal and returns a tokenized version of it, a list of arrays, each of the arrays
-    representing a polynomial monomials
-
-    Parameters:
-    ideal: list[PolyElement] - The ideal generators to be tokenized
-
-    Returns:
-    tokenized ideal
-    '''
-    polys_monomials = [jnp.array(poly.monoms()) for poly in ideal]
-
-    max_len = max(len(mono) for mono in polys_monomials)
-    padded_monos = [jnp.pad(mono, ((0, max_len - len(mono)), (0, 0))) for mono in polys_monomials]
-    tokenized_ideal = jnp.stack(padded_monos)
-
-    return tokenized_ideal
-
-
-def make_obs(G, P):
-    G = tokenize(G)
-    P = jnp.array(P)
-    obs = GroebnerState(G, P)
-    return obs
 
 
 class GrobnerExtractor(eqx.Module):
