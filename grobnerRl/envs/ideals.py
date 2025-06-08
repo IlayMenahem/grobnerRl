@@ -337,7 +337,7 @@ def random_polynomial(max_num_monoms, max_degree, vars, R):
 
         mon = R.one
         for var, exponent in zip(vars, exps):
-            mon *= var**exponent
+            mon *= var**int(exponent)
 
         coeff = scipy.stats.poisson.rvs(1) + 1
         poly += coeff * mon
@@ -366,4 +366,3 @@ def random_ideal(num_polys, max_num_monoms, max_degree, num_vars, field, order):
     ideal = [random_polynomial(max_num_monoms, max_degree, vars, R) for _ in range(num_polys)]
 
     return ideal
-
