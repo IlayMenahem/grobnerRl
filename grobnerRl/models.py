@@ -1,194 +1,126 @@
-import equinox as eqx
-import jax
-from jax import vmap
-import jax.numpy as jnp
-from jaxtyping import Array
-
-from grobnerRl.rl.utils import GroebnerState
+import torch
+from torch import nn
 
 
-class EmbeddingMonomials(eqx.Module):
-    embedding: eqx.nn.Embedding
+class Extractor(nn.Module):
+    MonomialEmbedder: nn.Module
+    PolynomialTransformer: nn.Module
+    Polynomial_embedder: nn.Module
+    IdealTransformer: nn.Module
 
-    def __init__(self, num_embeddings: int, output_dim: int, key):
+    def __init__(self, num_vars: int, monoms_embedding_dim: int, polys_embedding_dim: int,
+        polys_depth: int, polys_num_heads: int, ideal_depth: int, ideal_num_heads: int, dropout: float = 0.0):
+
+        super(Extractor, self).__init__()
+
+        self.MononomialEmbedder = nn.Linear(num_vars, monoms_embedding_dim)
+        self.PolynomialTransformer = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(monoms_embedding_dim, polys_num_heads, dim_feedforward = monoms_embedding_dim, dropout=dropout),
+            num_layers=polys_depth
+        )
+        self.Polynomial_embedder = nn.Linear(monoms_embedding_dim, polys_embedding_dim)
+        self.IdealTransformer = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(polys_embedding_dim, ideal_num_heads, dim_feedforward = polys_embedding_dim,  dropout=dropout),
+            num_layers=ideal_depth
+        )
+
+    def forward(self, ideal: list[list[torch.Tensor]]) -> torch.Tensor:
         '''
         Args:
-        num_embeddings: int - The number of embeddings, this is also the number of different
-        variables that the model can handle.
-        output_dim: int - The dimension of the output space
-        key - The key for random initialization
-        '''
-        self.embedding = eqx.nn.Embedding(num_embeddings, output_dim, key=key)
-
-    def __call__(self, monomials: Array) -> Array:
-        '''
-        embeds a monomials into a vector space of dimension output_dim
-
-        Args:
-        monomials: Array (num_monomials, num_vars) - The monomials to be embedded
+        ideal: list of lists of tensors, where each tensor represents a monomial
 
         Returns:
-        Array (num_monomials, output_dim) - The embedded monomials
+        torch.Tensor - values of the selectable pairs, the non selectable pairs are
+        set to -inf
         '''
-        num_vars = monomials.shape[-1]
-        embeddings = vmap(self.embedding)(jnp.arange(num_vars))
-        embedded = jnp.matmul(monomials, embeddings)
+        ideal = [[torch.Tensor(monomial) for monomial in polynomial] for polynomial in ideal]
 
-        return embedded
+        # Embed monomials
+        monomial_embeddings = [[self.MononomialEmbedder(monomial) for monomial in polynomial] for polynomial in ideal]
+        monomial_embeddings = [torch.stack(monomials) for monomials in monomial_embeddings]
 
+        # Embed polynomials
+        polynomial_encodings = [self.PolynomialTransformer(monomial_embedding.unsqueeze(0)).squeeze(0) for monomial_embedding in monomial_embeddings]
+        polynomial_encodings = [torch.mean(polynomial_encoding, dim=0) for polynomial_encoding in polynomial_encodings]
+        polynomial_encodings = torch.stack(polynomial_encodings)
+        polynomial_encodings = self.Polynomial_embedder(polynomial_encodings)
 
-class Transformer(eqx.Module):
-    layers: list[tuple[eqx.nn.MultiheadAttention, eqx.nn.Linear]]
-    linear: eqx.nn.Linear
-
-    def __init__(self, input_dim: int, depth: int, num_heads: int, key):
-        '''
-        Args:
-        input_dim: int - The dimension of the input
-        depth: int - The depth of the transformer
-        num_heads: int - The number of attention heads in each multi-head attention layer
-        key: PRNGKey - The key for random initialization
-
-        Returns:
-        Transformer - The initialized transformer
-        '''
-        keys = jax.random.split(key, 2*depth+1)
-
-        self.layers = [
-            (eqx.nn.MultiheadAttention(num_heads, input_dim, key=keys[2*i]), eqx.nn.Linear(input_dim, input_dim, key=keys[2*i+1]))
-            for i in range(depth)
-        ]
-        self.linear = eqx.nn.Linear(input_dim, input_dim, key=keys[-1])
-
-    def __call__(self, x: Array) -> Array:
-        '''
-        Args:
-        x: Array (seq_len, input_dim) - a 2d array of shape (seq_len, input_dim)
-        key: PRNGKey - The key for random initialization
-
-        Returns:
-        Array (seq_len, input_dim) - The embedded input array
-        '''
-        input = x
-
-        for attention, linear in self.layers:
-            attention_output = attention(input, input, input, key=None) + input
-            output = jax.nn.gelu(vmap(linear)(attention_output)) + attention_output
-
-            input = output
-
-        output = vmap(self.linear)(input)
-
-        return output
-
-
-class TransformerEmbedder(eqx.Module):
-    transformer: Transformer
-    adaptor: eqx.nn.Linear
-
-    def __init__(self, input_dim: int, output_dim: int, depth: int, num_heads: int, key):
-        '''
-        Args:
-        input_dim: int - The dimension of the input
-        output_dim: int - The dimension of the output
-        depth: int - The depth of the transformer
-        num_heads: int - The number of heads in the transformer
-        key: PRNGKey - The key for random initialization
-        '''
-        key1, key2 = jax.random.split(key, 2)
-
-        self.transformer = Transformer(input_dim, depth, num_heads, key=key1)
-        self.adaptor = eqx.nn.Linear(input_dim, output_dim, key=key2)
-
-    def __call__(self, x: Array) -> Array:
-        '''
-        Args:
-        x: Array (seq_len, input_dim) - a 2d array of shape (seq_len, input_dim)
-
-        Returns:
-        Array (output_dim) - The embedded input array
-        '''
-        x = self.transformer(x)
-        x = jnp.mean(x, axis=0)
-        x = self.adaptor(x)
-
-        return x
-
-
-class GrobnerExtractor(eqx.Module):
-    monomial_model: EmbeddingMonomials
-    polynomial_model: TransformerEmbedder
-    ideal_model: Transformer
-
-    def __init__(self, vars_limit: int, monoms_embedding_dim: int, polys_embedding_dim: int, polys_depth: int,
-        polys_num_heads: int, ideal_depth: int, ideal_num_heads: int, key):
-        '''
-        Args:
-        - vars_limit: int - The maximum number of variables in the polynomial ring
-        - monoms_embedding_dim: int - The dimension of the embedding space for monomials
-        - polys_embedding_dim: int - The dimension of the embedding space for polynomials
-        - polys_depth: int - The depth of the transformer model for polynomials
-        - polys_num_heads: int - The number of attention heads in the transformer model for polynomials
-        - ideal_depth: int - The depth of the transformer model for ideals
-        - ideal_num_heads: int - The number of attention heads in the transformer model for ideals
-        - key: jax.random.PRNGKey - The random key for initialization
-        '''
-        key1, key2, key3 = jax.random.split(key, 3)
-
-        self.monomial_model = EmbeddingMonomials(vars_limit, monoms_embedding_dim, key1)
-        self.polynomial_model = TransformerEmbedder(monoms_embedding_dim, polys_embedding_dim, polys_depth, polys_num_heads, key2)
-        self.ideal_model = Transformer(polys_embedding_dim, ideal_depth, ideal_num_heads, key3)
-
-    @eqx.filter_jit
-    def __call__(self, ideal) -> Array:
-        '''
-        scores each pair of polynomials to select to reduce in buchberger's algorithm
-
-        Args:
-        - ideal: Array - The ideal generators
-
-        Returns:
-        2d Array of scores for selecting a polynomial pair
-        '''
-        monomial_embeddings: Array = vmap(self.monomial_model)(ideal)
-        polynomial_embeddings: Array = vmap(self.polynomial_model)(monomial_embeddings)
-
-        polynomial_arrays = self.ideal_model(polynomial_embeddings)
-        values = jnp.matmul(polynomial_arrays, polynomial_arrays.T)
+        # Embed ideals
+        ideal_embeddings = self.IdealTransformer(polynomial_encodings.unsqueeze(1)).squeeze(1)
+        values = torch.matmul(ideal_embeddings, ideal_embeddings.T)
 
         return values
 
 
-@eqx.filter_jit
-def mask_selectables(values, selectables, masking_value):
-    mask = jnp.zeros_like(values)
-    mask = mask.at[tuple(zip(*selectables))].set(1)
-    values = jnp.where(mask == 1, values, masking_value)
-    return values
+class GrobnerPolicy(nn.Module):
+    extractor: Extractor
 
+    def __init__(self, extractor: Extractor):
+        super(GrobnerPolicy, self).__init__()
 
-class GrobnerPolicy(eqx.Module):
-    model: GrobnerExtractor
+        self.extractor = extractor
 
-    def __init__(self, groebner_model: GrobnerExtractor):
-        self.model = eqx.nn.inference_mode(groebner_model)
+    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor| list[torch.Tensor]:
+        if isinstance(obs, list):
+            return [self.forward(o) for o in obs]
 
-    def __call__(self, obs: GroebnerState) -> Array:
-        vals = self.model(obs.ideal)
-        vals = mask_selectables(vals, obs.selectables, -jnp.inf)
-        probs = jax.nn.softmax(vals, axis=None)
+        ideal: list[list[torch.Tensor]] = obs[0]
+        selectables: list[tuple[int,int]] = obs[1]
+        vals = self.extractor(ideal)
+
+        mask = torch.full_like(vals, float('-inf'))
+        for i, j in selectables:
+            mask[i, j] = 0.0
+
+        vals = vals + mask
+        vals = vals.flatten()
+
+        probs = torch.softmax(vals, dim=0)
 
         return probs
 
 
-class GrobnerCritic(eqx.Module):
-    model: GrobnerExtractor
+class GrobnerCritic(nn.Module):
+    extractor: Extractor
 
-    def __init__(self, groebner_model: GrobnerExtractor):
-        self.model = eqx.nn.inference_mode(groebner_model)
+    def __init__(self, extractor: Extractor):
+        super(GrobnerCritic, self).__init__()
 
-    def __call__(self, obs: GroebnerState) -> Array:
-        vals = self.model(obs.ideal)
-        value = jnp.mean(vals)
+        self.extractor = extractor
+
+    def forward(self, obs: tuple) -> torch.Tensor:
+        if isinstance(obs, list):
+            return [self.forward(o) for o in obs]
+
+        ideal, _ = obs
+
+        vals = self.extractor(ideal)
+        value = torch.mean(vals)
 
         return value
+
+
+if __name__ == "__main__":
+    num_vars = 3
+    monoms_embedding_dim = 32
+    polys_embedding_dim = 64
+    polys_depth = 2
+    polys_num_heads = 4
+    ideal_depth = 2
+    ideal_num_heads = 4
+
+    extractor_policy = Extractor(num_vars, monoms_embedding_dim, polys_embedding_dim,
+                          polys_depth, polys_num_heads, ideal_depth, ideal_num_heads)
+    extractor_critic = Extractor(num_vars, monoms_embedding_dim, polys_embedding_dim,
+                            polys_depth, polys_num_heads, ideal_depth, ideal_num_heads)
+
+    policy = GrobnerPolicy(extractor_policy)
+    critic = GrobnerCritic(extractor_critic)
+
+    ideal = [[torch.randn(num_vars) for _ in range(i)] for i in range(1,4)]
+    selectables = [(0, 1), (1, 2), (2, 0)]
+
+    obs = (ideal, selectables)
+
+    print(policy(obs))
+    print(critic(obs))

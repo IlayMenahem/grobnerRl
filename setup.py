@@ -11,18 +11,12 @@ setup(
     url="https://github.com/ilaymenahem/grobnerRl",
     packages=find_packages(),
     install_requires=[
-        'jax',
-        'chex',
-        'equinox',
-        'optax',
         'gymnasium',
         'tqdm',
         'numpy',
         'matplotlib',
         'sympy',
         'torch',
-        'torchvision',
-        'torchaudio'
     ],
     classifiers=[
         "Programming Language :: Python :: 3",

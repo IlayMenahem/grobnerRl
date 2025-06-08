@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 from grobnerRl.benchmark.optimalReductions import optimal_reductions
 from grobnerRl.envs.ideals import random_ideal
-from grobnerRl.models import make_obs
+from grobnerRl.envs.deepgroebner import make_obs
 from grobnerRl.Buchberger.BuchbergerIlay import init, step
 from grobnerRl.rl.utils import update_network
 
