@@ -23,13 +23,14 @@ def ppo_update(actor: nn.Module, critic: nn.Module, optimizer_actor: torch.optim
     returns: list, advantages: list, clip_epsilon: float, entropy_coeff: float, value_loss_coeff: float,
     clip_range_vf: float, max_grad_norm: float, target_kl: float) -> tuple[float, float, float, float]:
 
+    states = torch.tensor(states)
     actions = torch.tensor(actions)
     old_log_probs = torch.tensor(old_log_probs)
     returns = torch.tensor(returns)
     advantages = torch.tensor(advantages)
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-    dist = Categorical(logits=actor(states))
+    dist = Categorical(probs=actor(states))
     new_log_probs = dist.log_prob(actions)
     entropy = dist.entropy().mean()
 
@@ -61,8 +62,7 @@ def ppo_update(actor: nn.Module, critic: nn.Module, optimizer_actor: torch.optim
     return policy_loss.item(), value_loss.item(), entropy.item(), approx_kl
 
 
-
-def collect_trajectories(env: gym.Env, actor: nn.Module, batch_size: int, gamma: float) -> tuple[list, list[int], list[float], list[bool], list[float], list[float], float]:
+def collect_trajectories(env: gym.Env, actor: nn.Module, critic: nn.Module, batch_size: int, gamma: float) -> tuple[list, list[int], list[float], list[bool], list[float], list[float], float]:
     states, actions, rewards, dones, log_probs, values = [], [], [], [], [], []
     episode_rewards: list[float] = []
     ep_reward: float = 0
@@ -72,8 +72,8 @@ def collect_trajectories(env: gym.Env, actor: nn.Module, batch_size: int, gamma:
 
     pbar = tqdm(total=batch_size, desc="Collecting trajectories", leave=False)
     while len(states) < batch_size:
-        logits = actor(state)
-        dist = Categorical(logits=logits)
+        probs = actor(state)
+        dist = Categorical(probs=probs)
         action = dist.sample()
         log_prob: float = dist.log_prob(action).item()
         value: float = critic(state).item()
@@ -110,7 +110,7 @@ def ppo(env: gym.Env, actor: nn.Module, critic: nn.Module, optimizer_actor: torc
     clip_range_vf: float, target_kl: float, max_grad_norm: float)-> tuple[nn.Module, nn.Module]:
 
     for epoch in tqdm(range(num_epochs), desc="PPO epochs"):
-        states, actions, rewards, dones, old_log_probs, values, avg_reward = collect_trajectories(env, actor, batch_size, gamma)
+        states, actions, rewards, dones, old_log_probs, values, avg_reward = collect_trajectories(env, actor, critic, batch_size, gamma)
         advantages = compute_gae(rewards, values, dones, gamma, gae_lambda)
         returns = [adv + val for adv, val in zip(advantages, values)]
 
@@ -143,8 +143,10 @@ class Actor(nn.Module):
 
         x = torch.tanh(self.fc1(x))
         x = torch.tanh(self.fc2(x))
+        x = self.fc3(x)
+        probs = torch.softmax(x, dim=-1)
 
-        return self.fc3(x)
+        return probs
 
 
 class Critic(nn.Module):
