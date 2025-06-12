@@ -1,8 +1,10 @@
 import gymnasium as gym
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributions.categorical import Categorical
 from tqdm import tqdm
+from torch.nn.utils.rnn import pad_sequence
 
 
 def compute_gae(rewards: list[float], values: list[float], dones: list[bool], gamma: float, gae_lambda: float) -> list[float]:
@@ -23,14 +25,15 @@ def ppo_update(actor: nn.Module, critic: nn.Module, optimizer_actor: torch.optim
     returns: list, advantages: list, clip_epsilon: float, entropy_coeff: float, value_loss_coeff: float,
     clip_range_vf: float, max_grad_norm: float, target_kl: float) -> tuple[float, float, float, float]:
 
-    states = torch.tensor(states)
     actions = torch.tensor(actions)
     old_log_probs = torch.tensor(old_log_probs)
     returns = torch.tensor(returns)
     advantages = torch.tensor(advantages)
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-    dist = Categorical(probs=actor(states))
+    probs = actor(states)
+    probs = pad_sequence(probs, batch_first=True)
+    dist = Categorical(probs=probs)
     new_log_probs = dist.log_prob(actions)
     entropy = dist.entropy().mean()
 
@@ -71,7 +74,7 @@ def collect_trajectories(env: gym.Env, actor: nn.Module, critic: nn.Module, batc
     done: bool = False
 
     pbar = tqdm(total=batch_size, desc="Collecting trajectories", leave=False)
-    while len(states) < batch_size:
+    for _ in range(batch_size):
         probs = actor(state)
         dist = Categorical(probs=probs)
         action = dist.sample()
@@ -88,7 +91,7 @@ def collect_trajectories(env: gym.Env, actor: nn.Module, critic: nn.Module, batc
         log_probs.append(log_prob)
         values.append(value)
 
-        ep_reward += reward
+        ep_reward += float(reward)
         state = next_state
         pbar.update(1)
 
@@ -118,10 +121,10 @@ def ppo(env: gym.Env, actor: nn.Module, critic: nn.Module, optimizer_actor: torc
                                                                  states, actions, old_log_probs, returns, advantages,
                                                                  clip_epsilon, entropy_coeff, value_loss_coeff,
                                                                  clip_range_vf, max_grad_norm, target_kl)
-        tqdm.write(f"Epoch {epoch + 1}: Avg Reward {avg_reward:.2f}  Policy Loss {policy_loss:.3f}  Value Loss {value_loss:.3f}  Entropy {entropy:.3f}  KL {approx_kl:.5f}")
+        tqdm.write(f"Epoch {epoch + 1}: Avg Reward {avg_reward:.2f}  Policy Loss {policy_loss:.10f}  Value Loss {value_loss:.3f}  Entropy {entropy:.3f}  KL {approx_kl:.6f}")
 
         if approx_kl > target_kl:
-            print(f"Early stopping at epoch {epoch + 1} due to reaching target KL")
+            print(f"Early stopping at epoch {epoch + 1} due to reaching target KL (KL: {approx_kl:.6f} > {target_kl})")
             break
 
     return actor, critic
@@ -136,7 +139,7 @@ class Actor(nn.Module):
 
     def forward(self, x):
         if isinstance(x, list):
-            return torch.stack([self.forward(torch.tensor(s, dtype=torch.float32)) for s in x])
+            return self.forward(torch.tensor(np.array(x)))
 
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32)
@@ -158,7 +161,7 @@ class Critic(nn.Module):
 
     def forward(self, x):
         if isinstance(x, list):
-            return torch.stack([self.forward(torch.tensor(s, dtype=torch.float32)) for s in x])
+            return self.forward(torch.tensor(np.array(x)))
 
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32)

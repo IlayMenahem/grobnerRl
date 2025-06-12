@@ -4,6 +4,7 @@ An environment for computing Groebner bases with Buchberger's algorithm.
 credit to the authors of the deepgroebner paper
 """
 
+from copy import deepcopy
 from sympy.polys.rings import PolyElement
 from typing import Sequence
 import bisect
@@ -30,7 +31,8 @@ def tokenize(ideal: Sequence[PolyElement]) -> list[np.ndarray]:
     return polys_monomials
 
 
-def make_obs(G, P):
+def make_obs(G, P) -> tuple[list[np.ndarray], list[tuple[int, int]]]:
+    P = deepcopy(P)
     G = tokenize(G)
 
     return G, P
@@ -267,8 +269,7 @@ def buchberger(F, S=None, elimination='gebauermoeller', selection='normal', step
              'nonzero_reductions': 0,
              'polynomial_additions': 0,
              'total_reward': 0.0,
-             'discounted_return': 0.0,
-             'steps': 0}
+             'discounted_return': 0.0}
     discount = 1.0
 
     if sort_reducers and len(G) > 0:
@@ -288,12 +289,6 @@ def buchberger(F, S=None, elimination='gebauermoeller', selection='normal', step
         stats['polynomial_additions'] += s['steps'] + 1
         stats['total_reward'] += reward
         stats['discounted_return'] += discount * reward
-        stats['steps'] += 1
-
-        if step_limit is not None and stats['steps'] >= step_limit:
-            stats['valid'] = False
-            return [], stats
-
         discount *= gamma
         if r != 0:
             G, P = update(G, P, r.monic(), lmG=lmG, strategy=elimination)
@@ -310,8 +305,6 @@ def buchberger(F, S=None, elimination='gebauermoeller', selection='normal', step
             stats['nonzero_reductions'] += 1
         else:
             stats['zero_reductions'] += 1
-
-    stats['valid'] = True
 
     return interreduce(minimalize(G)), stats
 
@@ -345,9 +338,6 @@ class BuchbergerEnv(gym.Env):
     ----------
     ideal_dist : str or IdealGenerator, optional
         IdealGenerator or string naming the ideal distribution.
-    mode : {'jax', 'game'}, optional
-        Mode for observation format. 'jax' returns structured observations,
-        'game' returns raw polynomial lists.
     elimination : {'gebauermoeller', 'lcm', 'none'}, optional
         Strategy for pair elimination.
     rewards : {'additions', 'reductions'}, optional
@@ -356,6 +346,9 @@ class BuchbergerEnv(gym.Env):
         Whether to sort the initial generating set by lead monomial.
     sort_reducers : bool, optional
         Whether to choose reducers in sorted order by lead monomial.
+    mode : {'train', 'eval'}, optional
+        Mode for the environment. In 'train' mode, actions are integers and
+        ideals are tokenized.
 
     Examples
     --------
@@ -421,9 +414,7 @@ class BuchbergerEnv(gym.Env):
     """
 
     def __init__(self, ideal_dist='3-20-10-uniform', elimination='gebauermoeller',
-                 rewards='additions', sort_input=False, sort_reducers=True, mode='game'):
-        if mode not in ['game', 'train']:
-            raise ValueError('mode must be either jax or game')
+                 rewards='additions', sort_input=False, sort_reducers=True, mode='eval'):
 
         self.mode = mode
         self.ideal_gen = self._make_ideal_gen(ideal_dist)
@@ -467,28 +458,32 @@ class BuchbergerEnv(gym.Env):
                 self.G_ = self.G
                 self.lmG_ = self.lmG
 
-        obs = (self.G, self.P)
+        observation = (self.G, self.P)
         if self.mode == 'train':
-            obs = make_obs(*obs)
+            observation = make_obs(*observation)
 
         info = {}
 
-        return obs, info if self.P else self.reset()
+        if not self.P:
+            return self.reset()
 
-    def step(self, action):
-        if self.mode == 'train':
-            # convert int action to tuple
-            action = (action // len(self.G), action % len(self.G))
+        return observation, info
+
+    def step(self, action: int|tuple[int,int]):
+        """Perform one reduction and return the new polynomial list and pair list."""
+        def int_action_to_pair(action: int) -> tuple[int, int]:
+            return (action // len(self.G), action % len(self.G))
+
+        if self.mode == 'train' and isinstance(action, (int, np.integer)):
+            action = int_action_to_pair(action)
 
         i, j = action
         self.P.remove(action)
         s = spoly(self.G[i], self.G[j], lmf=self.lmG[i], lmg=self.lmG[j])
         r, stats = reduce(s, self.G_, lmF=self.lmG_)
-
         if r != 0:
             self.G, self.P = update(self.G, self.P, r.monic(), lmG=self.lmG, strategy=self.elimination)
             self.lmG.append(r.LM)
-
             if self.sort_reducers:
                 key = self.order(r.LM)
                 index = bisect.bisect(self.keysG_, key)
@@ -499,15 +494,16 @@ class BuchbergerEnv(gym.Env):
                 self.G_ = self.G
                 self.lmG_ = self.G_
 
-        obs = (self.G, self.P)
+        observation = (self.G, self.P)
         if self.mode == 'train':
-            obs = make_obs(*obs)
+            observation = make_obs(*observation)
 
         reward = -(1.0 + stats['steps']) if self.rewards == 'additions' else -1.0
-        done = len(self.P) == 0
+        terminated = len(self.P) == 0
+        truncated = False
         info = {}
 
-        return obs, reward, done, done, info
+        return observation, reward, terminated, truncated, info
 
     def seed(self, seed=None):
         self.ideal_gen.seed(seed)
@@ -613,12 +609,12 @@ class LeadMonomialsEnv:
         return self._matrix(), {}
 
     def step(self, action):
-        (G, P), reward, done, done, info = self.env.step(self.env.P[action])
+        (G, P), reward, terminated, truncated, info = self.env.step(self.env.P[action])
 
         if len(G) > len(self.leads):
             self.leads.append(lead_monomials_vector(G[-1], self.ring, k=self.k, dtype=self.dtype))
 
-        return self._matrix(), reward, done, done, info
+        return self._matrix(), reward, terminated, truncated, info
 
     def seed(self, seed=None):
         self.env.seed(seed)

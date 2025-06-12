@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import numpy as np
 
 
 class Extractor(nn.Module):
@@ -33,11 +34,10 @@ class Extractor(nn.Module):
         torch.Tensor - values of the selectable pairs, the non selectable pairs are
         set to -inf
         '''
-        ideal = [[torch.Tensor(monomial) for monomial in polynomial] for polynomial in ideal]
+        ideal = [torch.Tensor(np.array(polynomial)) for polynomial in ideal]
 
         # Embed monomials
-        monomial_embeddings = [[self.MononomialEmbedder(monomial) for monomial in polynomial] for polynomial in ideal]
-        monomial_embeddings = [torch.stack(monomials) for monomials in monomial_embeddings]
+        monomial_embeddings = [self.MononomialEmbedder(polynomial) for polynomial in ideal]
 
         # Embed polynomials
         polynomial_encodings = [self.PolynomialTransformer(monomial_embedding.unsqueeze(0)).squeeze(0) for monomial_embedding in monomial_embeddings]
@@ -90,7 +90,8 @@ class GrobnerCritic(nn.Module):
 
     def forward(self, obs: tuple) -> torch.Tensor:
         if isinstance(obs, list):
-            return [self.forward(o) for o in obs]
+            values = [self.forward(o) for o in obs]
+            return torch.stack(values)
 
         ideal, _ = obs
 
