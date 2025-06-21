@@ -1,17 +1,20 @@
-import sympy
-import optax
-import jax
+import os
+import torch
+from torch.utils.data import DataLoader
+from grobnerRl.data import BCDataset, bc_collate
+from grobnerRl.models import GrobnerPolicy, Extractor
+from grobnerRl.rl.bc import train_bc
 
-from grobnerRl.models import GrobnerPolicy, GrobnerExtractor
-from grobnerRl.rl.bc import train_bc, BCDataloader
 
 if __name__ == "__main__":
-    ideal_params = (10, 3, 5, 3, sympy.FF(32003), 'grevlex')
-    dataloader = BCDataloader(ideal_params, 10000, 256)
+    num_vars = 3
+    max_degree = 4
+    num_polynomials = 4
+    path = os.path.join(os.getcwd(), 'data', 'optimal_reductions.json')
 
-    key = jax.random.key(42)
-    key, subkey = jax.random.split(key)
-    policy = GrobnerPolicy(GrobnerExtractor(3, 16, 32, 1, 1, 1, 1, subkey))
+    dataset = BCDataset(path)
+    dataloader = DataLoader(dataset, batch_size=256, shuffle=True, collate_fn=bc_collate)
+    policy = GrobnerPolicy(Extractor(3, 32, 128, 2, 4, 2, 4))
+    optimizer = torch.optim.Adam(policy.parameters(), lr=1e-4)
 
-    optimizer = optax.chain(optax.clip_by_global_norm(0.25), optax.adam(1e-4))
     policy = train_bc(policy, dataloader, 100, optimizer)
