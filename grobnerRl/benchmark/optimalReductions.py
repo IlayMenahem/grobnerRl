@@ -64,8 +64,10 @@ def optimal_reductions(ideal: list, step_limit: int):
 
     visited = {}
     heap = []
+    counter = 0  # Add counter for tie-breaking
     initial_h = heuristic(basis)
-    heapq.heappush(heap, (initial_h, 0, basis, pairs, []))
+    heapq.heappush(heap, (initial_h, 0, counter, basis, pairs, []))
+    counter += 1
 
     num_steps = 0
     best_sequence = None
@@ -73,7 +75,7 @@ def optimal_reductions(ideal: list, step_limit: int):
     best_length = float('inf')
 
     while heap:
-        f, g, basis_curr, pairs_curr, seq = heapq.heappop(heap)
+        f, g, _, basis_curr, pairs_curr, seq = heapq.heappop(heap)
 
         key = state_key(basis_curr, pairs_curr)
         if key in visited and visited[key] <= g:
@@ -97,7 +99,8 @@ def optimal_reductions(ideal: list, step_limit: int):
             new_h = heuristic(new_basis)
             new_f = new_g + new_h
 
-            heapq.heappush(heap, (new_f, new_g, new_basis, new_pairs, new_seq))
+            heapq.heappush(heap, (new_f, new_g, counter, new_basis, new_pairs, new_seq))
+            counter += 1
 
     if not best_sequence:
         return None, None, num_steps
