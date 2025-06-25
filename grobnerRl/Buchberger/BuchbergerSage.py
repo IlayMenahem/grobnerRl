@@ -1,5 +1,5 @@
 from sage.structure.sequence import Sequence
-from sage.all_cmdline import *
+from sage.all_cmdline import QQ, Integer, matrix, copy, WeightedIntegerVectors
 
 def LCM(f, g):
     return f.parent().monomial_lcm(f, g)

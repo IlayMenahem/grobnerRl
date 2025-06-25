@@ -99,7 +99,7 @@ def reduce(g, F, lmF=None):
     return r, stats
 
 
-def update(G, P, f, strategy='gebauermoeller', lmG=None):
+def update(G, P, f, strategy='optimal', lmG=None):
     """Return the updated lists of polynomials and pairs when f is added to the basis G.
 
     The inputs G and P are modified by this function.
@@ -135,6 +135,24 @@ def update(G, P, f, strategy='gebauermoeller', lmG=None):
      [(0, 2)])
 
     """
+    def chain_rule(p, lmG):
+        i, j = p
+        gam = lcm(lmG[i], lmG[j])
+
+        chain_rule_applicable = (div(gam, lmf) and gam != lcm(lmG[i], lmf) and gam != lcm(lmG[j], lmf))
+
+        return chain_rule_applicable
+
+    def power_rule(p, G):
+        i, j = p
+
+        i_lm = G[i].LM
+        j_lm = G[j].LM
+
+        power_rule_applicable = (lcm(i_lm, j_lm) == mul(i_lm, j_lm))
+
+        return power_rule_applicable
+
     lmf = f.LM
     lmG = [g.LM for g in G] if lmG is None else lmG
     R = f.ring
@@ -150,11 +168,7 @@ def update(G, P, f, strategy='gebauermoeller', lmG=None):
         P_ = [(i, m) for i in range(m) if lcm(lmG[i], lmf) != mul(lmG[i], lmf)]
 
     elif strategy == 'gebauermoeller':
-        def can_drop(p):
-            i, j = p
-            gam = lcm(lmG[i], lmG[j])
-            return div(gam, lmf) and gam != lcm(lmG[i], lmf) and gam != lcm(lmG[j], lmf)
-        P[:] = [p for p in P if not can_drop(p)]
+        P[:] = [p for p in P if not chain_rule(p, lmG)]
 
         lcms = {}
         for i in range(m):
@@ -167,6 +181,19 @@ def update(G, P, f, strategy='gebauermoeller', lmG=None):
                 if not any(lcm(lmG[i], lmf) == mul(lmG[i], lmf) for i in lcms[gam]):
                     P_.append((lcms[gam][0], m))
         P_.sort(key=lambda p: p[0])
+
+    elif strategy == 'optimal':
+        def none_zero(p):
+            i, j = p
+            s = spoly(G[i], G[j])
+            r, _ = reduce(s, G)
+
+            return r != 0
+
+        G, P = update(G, P, f, strategy='gebauermoeller')
+        P = [pair for pair in P if none_zero(pair) and not power_rule(pair, G)]
+
+        return G, P
 
     else:
         raise ValueError('unknown elimination strategy')

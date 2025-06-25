@@ -6,6 +6,7 @@ import math
 import random
 import heapq
 from sympy.polys.rings import PolyElement
+from sympy.polys.groebnertools import is_groebner
 from grobnerRl.Buchberger.BuchbergerIlay import init, step, interreduce, minimalize, buchberger
 from grobnerRl.Buchberger.BuchbergerSympy import groebner
 from grobnerRl.envs.ideals import random_ideal
@@ -22,8 +23,10 @@ def state_key(basis: list, pairs: list) -> tuple:
     Returns:
         tuple: A tuple representing the state key.
     '''
-    basis_key = tuple(sorted(p for p in basis))
+    polys = ((tuple(p.monoms()), tuple(map(int, p.coeffs()))) for p in basis)
+    basis_key = tuple(sorted(polys))
     pairs_key = tuple(sorted(pairs))
+
     return (basis_key, pairs_key)
 
 
@@ -106,6 +109,9 @@ def optimal_reductions(ideal: list, step_limit: int):
         return None, None, num_steps
 
     best_basis = interreduce(minimalize(best_basis))
+
+    if not is_groebner(best_basis, ideal[0].ring):
+        raise ValueError("The computed basis is not a Groebner basis.")
 
     return best_sequence, best_basis, num_steps
 

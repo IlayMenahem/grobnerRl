@@ -2,6 +2,7 @@ import os
 import json
 import numpy as np
 from torch.utils.data import Dataset
+from tqdm import tqdm
 
 from grobnerRl.benchmark.optimalReductions import optimal_reductions
 from grobnerRl.envs.ideals import IdealGenerator
@@ -36,10 +37,14 @@ def generate_data(ideal_generator: IdealGenerator, step_limit: int, size: int, p
     states: list[tuple[list[np.ndarray], list[tuple[int, int]]]] = []
     actions: list[int] = []
 
+    pbar = tqdm(total=size, desc='Generating dataset', unit='pair')
+
     while len(states) < size:
         ideal, optimal_sequence = get_optimal_sequence(ideal_generator, step_limit)
 
         pairs, basis = init(ideal)
+
+        pbar.update(len(optimal_sequence))
 
         for action in optimal_sequence:
             current_state = make_obs(basis, pairs)
