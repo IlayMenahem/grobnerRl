@@ -2,8 +2,6 @@
 Optimal or near-optimal reductions for the Groebner basis computation, for small ideals
 '''
 
-import math
-import random
 import heapq
 from sympy.polys.rings import PolyElement
 from sympy.polys.groebnertools import is_groebner
@@ -17,8 +15,8 @@ def state_key(basis: list, pairs: list) -> tuple:
     Create a unique key for the state based on the basis and pairs.
 
     Args:
-        basis (list): The current basis.
-        pairs (list): The current pairs.
+    - basis (list): The current basis.
+    - pairs (list): The current pairs.
 
     Returns:
         tuple: A tuple representing the state key.
@@ -118,22 +116,6 @@ def optimal_reductions(ideal: list, step_limit: int):
 
 def neighbor(ideal: list, reductions: list) -> list:
     raise NotImplementedError("This function should be implemented to generate a neighbor state based on the current reductions.")
-
-
-def simulated_annealing(ideal: list, t0: float, alpha: float, num_steps: int):
-    _, reductions = buchberger(ideal)
-    tempture = t0
-
-    for _ in range(num_steps):
-        new_reductions = neighbor(ideal, reductions)
-        delta = len(new_reductions) - len(reductions)
-
-        if delta < 0 or random.random() < math.exp(-delta / tempture):
-            reductions = new_reductions
-
-        tempture *= alpha
-
-    return reductions
 
 
 def experiment(num_episodes: int, step_limit: int, *ideal_params) -> float:
