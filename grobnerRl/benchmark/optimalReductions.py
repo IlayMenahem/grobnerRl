@@ -5,7 +5,7 @@ Optimal or near-optimal reductions for the Groebner basis computation, for small
 import heapq
 from sympy.polys.rings import PolyElement
 from sympy.polys.groebnertools import is_groebner
-from grobnerRl.Buchberger.BuchbergerIlay import init, step, interreduce, minimalize, buchberger
+from grobnerRl.Buchberger.BuchbergerIlay import init, step, interreduce, minimalize
 from grobnerRl.Buchberger.BuchbergerSympy import groebner
 from grobnerRl.envs.ideals import random_ideal
 
