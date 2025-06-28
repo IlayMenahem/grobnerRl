@@ -8,13 +8,12 @@ def bc_loss(policy, actions, states):
     action_preds = policy(states)
     action_preds = pad_sequence(action_preds, batch_first=True)
     actions = torch.tensor(actions, dtype=torch.long)
-    actions_one_hot = F.one_hot(actions, num_classes=action_preds.size(-1)).float()
-    loss = F.cross_entropy(action_preds, actions_one_hot)
+    loss = F.cross_entropy(action_preds, actions)
 
     return loss
 
 
-def train_bc(policy, dataloader, num_epochs, optimizer):
+def train_bc(policy, dataloader, num_epochs, optimizer, scheduler=None):
     losses = []
     progressbar = tqdm(total=num_epochs, desc="Training", unit="epoch")
     epoch_progressbar = tqdm(total=len(dataloader), desc="Epoch Progress", leave=False)
@@ -35,6 +34,9 @@ def train_bc(policy, dataloader, num_epochs, optimizer):
 
         avg_epoch_loss = sum(epoch_losses) / len(epoch_losses)
         losses.append(avg_epoch_loss)
+
+        if scheduler is not None:
+            scheduler.step(avg_epoch_loss)
 
         epoch_progressbar.reset()
         progressbar.update(1)
