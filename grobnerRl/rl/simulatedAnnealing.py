@@ -18,7 +18,7 @@ def get_temp(T0, k, type='log'):
     raise ValueError(f"Unknown temperature type: {type}. Supported types are 'log' and 'linear'.")
 
 
-def simulated_annealing(t0: float, num_steps: int, state0, neighbor_fn, cost_fn, next_state_fn, minimize=True):
+def _simulated_annealing(t0: float, num_steps: int, state0, neighbor_fn, cost_fn, next_state_fn, minimize=True):
     '''
     Perform simulated annealing to find a near-optimal solution.
 
@@ -96,6 +96,14 @@ def next_state_diffusion(neighbors_fn, current_state, cost_fn, current_cost, min
     current_cost = neighbors_cost[chosen_index]
 
     return current_state, current_cost
+
+
+def simulated_annealing(t0: float, num_steps: int, state0, neighbor_fn, cost_fn, minimize=True):
+    return _simulated_annealing(t0, num_steps, state0, neighbor_fn, cost_fn, next_state_sa, minimize)
+
+
+def simulated_diffusion(t0: float, num_steps: int, state0, neighbors_fn, cost_fn, minimize=True):
+    return _simulated_annealing(t0, num_steps, state0, neighbors_fn, cost_fn, next_state_diffusion, minimize)
 
 
 def plot_progress(progress_best, progress_current, temperatures):
@@ -197,14 +205,10 @@ if __name__ == "__main__":
     initial_state = tuple(range(number_of_cities))
     t0 = 75.0
     num_steps = 100000
-    best_state, best_cost, progress_best, progress_current, temperatures = simulated_annealing(
-        t0, num_steps, initial_state, tsp_neighbor, tsp_cost, next_state_sa
-    )
+    best_state, best_cost, progress_best, progress_current, temperatures = simulated_annealing(t0, num_steps, initial_state, tsp_neighbor, tsp_cost)
     plot_progress(progress_best, progress_current, temperatures)
 
     t0 = 50.0
     num_steps = 10000
-    best_state, best_cost, progress_best, progress_current, temperatures = simulated_annealing(
-        t0, num_steps, initial_state, neighbors_and_cost, tsp_cost, next_state_diffusion
-    )
+    best_state, best_cost, progress_best, progress_current, temperatures = simulated_diffusion(t0, num_steps, initial_state, neighbors_and_cost, tsp_cost)
     plot_progress(progress_best, progress_current, temperatures)
