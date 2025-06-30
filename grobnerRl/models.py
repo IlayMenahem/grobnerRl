@@ -3,25 +3,56 @@ from torch import nn
 import numpy as np
 
 
+class DeepSetsEncoder(nn.Module):
+    """
+    A permutation-invariant encoder for sets implemented in PyTorch.
+
+    Given input X of shape (n, d), this module outputs a vector of shape (d',).
+    Internally it applies phi to each row, sums across the set dimension,
+    then applies rho to the aggregated representation.
+    """
+    def __init__(self, input_dim: int, phi_hidden: int, rho_hidden: int, output_dim: int):
+        super(DeepSetsEncoder, self).__init__()
+        # phi: elementwise feature extractor
+        self.phi = nn.Sequential(
+            nn.Linear(input_dim, phi_hidden),
+            nn.ReLU(),
+            nn.Linear(phi_hidden, phi_hidden),
+            nn.ReLU(),
+            nn.Linear(phi_hidden, phi_hidden)
+        )
+        # rho: post-aggregation processor
+        self.rho = nn.Sequential(
+            nn.Linear(phi_hidden, rho_hidden),
+            nn.ReLU(),
+            nn.Linear(rho_hidden, output_dim),
+            nn.ReLU(),
+            nn.Linear(output_dim, output_dim)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: Tensor of shape (n, d)
+        returns: Tensor of shape (d',)
+        """
+        h = self.phi(x)
+        h_sum = torch.sum(h, dim=0)
+        res = self.rho(h_sum)
+
+        return res
+
+
 class Extractor(nn.Module):
-    monomial_embedder: nn.Module
-    polynomial_transformer: nn.Module
-    polynomial_embedder: nn.Module
+    polynomial_embedder: DeepSetsEncoder
     ideal_transformer: nn.Module
 
-    def __init__(self, num_vars: int, monoms_embedding_dim: int, polys_embedding_dim: int,
-        polys_depth: int, polys_num_heads: int, ideal_depth: int, ideal_num_heads: int, dropout: float = 0.0):
+    def __init__(self, num_vars: int, monoms_embedding_dim: int, polys_embedding_dim: int, ideal_depth: int, ideal_num_heads: int):
 
         super(Extractor, self).__init__()
 
-        self.monomial_embedder = nn.Linear(num_vars, monoms_embedding_dim)
-        self.polynomial_transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(monoms_embedding_dim, polys_num_heads, dropout=dropout, batch_first=True),
-            num_layers=polys_depth
-        )
-        self.polynomial_embedder = nn.Linear(monoms_embedding_dim, polys_embedding_dim)
+        self.polynomial_embedder = DeepSetsEncoder(num_vars, monoms_embedding_dim, polys_embedding_dim, polys_embedding_dim)
         self.ideal_transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(polys_embedding_dim, ideal_num_heads,  dropout=dropout, batch_first=True),
+            nn.TransformerEncoderLayer(polys_embedding_dim, ideal_num_heads,  dropout=0.0, batch_first=True),
             num_layers=ideal_depth
         )
 
@@ -34,17 +65,11 @@ class Extractor(nn.Module):
         torch.Tensor - values of the selectable pairs, the non selectable pairs are
         set to -inf
         '''
-        ideal = [torch.Tensor(polynomial) for polynomial in ideal]
-
-        # Embed monomials
-        monomial_embeddings = [self.monomial_embedder(polynomial) for polynomial in ideal]
+        _ideal = [torch.Tensor(polynomial) for polynomial in ideal]
 
         # Embed polynomials
-        # Process each polynomial's monomials as a batch of size 1
-        polynomial_encodings = [self.polynomial_transformer(monomial_embedding.unsqueeze(0)).squeeze(0) for monomial_embedding in monomial_embeddings]
-        polynomial_encodings = [torch.mean(polynomial_encoding, dim=0) for polynomial_encoding in polynomial_encodings]
+        polynomial_encodings = [self.polynomial_embedder(poly) for poly in _ideal]
         polynomial_encodings = torch.stack(polynomial_encodings)
-        polynomial_encodings = self.polynomial_embedder(polynomial_encodings)
 
         # Embed ideals
         # Process the ideal's polynomials as a batch of size 1
@@ -83,24 +108,42 @@ class GrobnerPolicy(nn.Module):
 
 
 class GrobnerCritic(nn.Module):
-    extractor: Extractor
+    polynomial_embedder: DeepSetsEncoder
+    ideal_encoder: DeepSetsEncoder
+    evaluator: nn.Module
 
-    def __init__(self, extractor: Extractor):
+    def __init__(self, num_vars: int, monoms_embedding_dim: int, polys_embedding_dim: int,
+       ideal_encodeing_dim: int):
         super(GrobnerCritic, self).__init__()
 
-        self.extractor = extractor
+        self.polynomial_embedder = DeepSetsEncoder(num_vars, monoms_embedding_dim, polys_embedding_dim, polys_embedding_dim)
+        self.ideal_encoder = DeepSetsEncoder(polys_embedding_dim, polys_embedding_dim, ideal_encodeing_dim, ideal_encodeing_dim)
 
-    def forward(self, obs: tuple) -> torch.Tensor:
+        self.evaluator = nn.Sequential(
+            nn.Linear(ideal_encodeing_dim, ideal_encodeing_dim),
+            nn.ReLU(),
+            nn.Linear(ideal_encodeing_dim, 1)
+        )
+
+    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor| list[torch.Tensor]:
         if isinstance(obs, list):
             values = [self.forward(o) for o in obs]
             return torch.stack(values)
 
         ideal, _ = obs
+        ideal = [torch.Tensor(polynomial) for polynomial in ideal]
 
-        vals = self.extractor(ideal)
-        value = torch.mean(vals)
+        # Embed polynomials
+        polynomial_encodings = [self.polynomial_embedder(poly) for poly in ideal]
+        polynomial_encodings = torch.stack(polynomial_encodings)
 
-        return value
+        # Embed ideals
+        ideal_embeddings = self.ideal_encoder(polynomial_encodings)
+
+        # Evaluate the ideal
+        values = self.evaluator(ideal_embeddings)
+
+        return values
 
 
 class TwinExtractor(nn.Module):
@@ -112,7 +155,7 @@ class TwinExtractor(nn.Module):
         super(TwinExtractor, self).__init__()
         self.linear1 = nn.Linear(num_vars * num_monomials, polys_embedding_dim)
         self.linear2 = nn.Linear(polys_embedding_dim, polys_embedding_dim)
-        self.evaluation1 = nn.Linear(2*polys_embedding_dim, polys_embedding_dim)
+        self.evaluation1 = nn.Linear(2 * polys_embedding_dim, polys_embedding_dim)
         self.evaluation2 = nn.Linear(polys_embedding_dim, 1)
 
 

@@ -15,10 +15,10 @@ if __name__ == "__main__":
 
     dataset = BCDataset(path)
     dataloader = DataLoader(dataset, batch_size=128, shuffle=True, collate_fn=bc_collate)
-    policy = GrobnerPolicy(Extractor(3, 32, 128, 2, 4, 2, 4))
-    policy = TwinPolicy(TwinExtractor(num_vars, num_monomials, 256))
+    policy = GrobnerPolicy(Extractor(3, 32, 128, 2, 4))
+    # policy = TwinPolicy(TwinExtractor(num_vars, num_monomials, 256))
 
-    optimizer = torch.optim.Adam(policy.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=5e-5)
     schedualer = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=25)
 
     policy = train_bc(policy, dataloader, 500, optimizer, schedualer)

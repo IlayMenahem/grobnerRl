@@ -9,10 +9,10 @@ if __name__ == "__main__":
     num_polynomials = 4
 
     env = BuchbergerEnv(f'{num_vars}-{max_degree}-{num_polynomials}-uniform', mode='train')
-    extractor_args = (num_vars, 16, 32, 2, 4, 2, 4)
+    extractor_args = (num_vars, 32, 64, 2, 4)
 
     actor = GrobnerPolicy(Extractor(*extractor_args))
-    critic = GrobnerCritic(Extractor(*extractor_args))
+    critic = GrobnerCritic(num_vars, 32, 64, 256)
 
     optimizer_actor = torch.optim.Adam(actor.parameters(), lr=1e-5)
     optimizer_critic = torch.optim.Adam(critic.parameters(), lr=1e-4)
