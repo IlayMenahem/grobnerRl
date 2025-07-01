@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import numpy as np
+from torch.nn.utils.rnn import pad_sequence
 
 
 class DeepSetsEncoder(nn.Module):
@@ -89,7 +90,7 @@ class GrobnerPolicy(nn.Module):
 
     def forward(self, obs: tuple|list[tuple]) -> torch.Tensor| list[torch.Tensor]:
         if isinstance(obs, list):
-            return [self.forward(o) for o in obs]
+            return pad_sequence([self.forward(o) for o in obs], batch_first=True)
 
         ideal: list[list[torch.Tensor]] = obs[0]
         selectables: list[tuple[int,int]] = obs[1]
@@ -144,87 +145,6 @@ class GrobnerCritic(nn.Module):
         values = self.evaluator(ideal_embeddings)
 
         return values
-
-
-class TwinExtractor(nn.Module):
-    '''
-    gets a pair polynomials and returns the value of the pair
-    '''
-
-    def __init__(self, num_vars: int, num_monomials: int, polys_embedding_dim: int):
-        super(TwinExtractor, self).__init__()
-        self.linear1 = nn.Linear(num_vars * num_monomials, polys_embedding_dim)
-        self.linear2 = nn.Linear(polys_embedding_dim, polys_embedding_dim)
-        self.evaluation1 = nn.Linear(2 * polys_embedding_dim, polys_embedding_dim)
-        self.evaluation2 = nn.Linear(polys_embedding_dim, 1)
-
-
-    def _embed_polynomial(self, poly: torch.Tensor) -> torch.Tensor:
-        '''
-        embeds a polynomial represented as a tensor
-
-        Args:
-        - poly (torch.Tensor): a tensor representing a polynomial
-
-        Returns:
-        - torch.Tensor: the embedded polynomial
-        '''
-        poly = poly.flatten()
-
-        if poly.shape[0] != self.linear1.in_features:
-            poly = torch.cat((poly, torch.zeros(self.linear1.in_features - poly.shape[0], dtype=poly.dtype)))
-
-        x = self.linear1(poly)
-        x = torch.relu(x)
-        x = self.linear2(x)
-
-        return x
-
-
-    def forward(self, pair: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
-        '''
-        takes a pair of polynomials and returns the value of reducing the pair
-
-        Args:
-        - pair (tuple[torch.Tensor, torch.Tensor]): a pair of polynomials, each represented as a tensor
-
-        Returns:
-        - torch.Tensor: the value of the pair
-        '''
-        poly1, poly2 = pair
-
-        poly1 = self._embed_polynomial(poly1)
-        poly2 = self._embed_polynomial(poly2)
-
-        x = torch.cat((poly1, poly2), dim=0)
-        x = self.evaluation1(x)
-        x = torch.relu(x)
-        x = self.evaluation2(x)
-
-        return x.squeeze(0)
-
-
-class TwinPolicy(nn.Module):
-    def __init__(self, extractor: TwinExtractor):
-        super(TwinPolicy, self).__init__()
-        self.extractor = extractor
-
-    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor| list[torch.Tensor]:
-        if isinstance(obs, list):
-            res = [self.forward(o) for o in obs]
-
-            return res
-
-        ideal, selectables = obs
-        vals = torch.full((len(ideal), len(ideal)), float('-inf'))
-
-        for i, j in selectables:
-            vals[i, j] = self.extractor((torch.Tensor(ideal[i]), torch.Tensor(ideal[j])))
-
-        vals = vals.flatten()
-        probs = torch.softmax(vals, dim=0)
-
-        return probs
 
 
 if __name__ == "__main__":

@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 from torch.distributions.categorical import Categorical
 from tqdm import tqdm
-from torch.nn.utils.rnn import pad_sequence
 
 
 def compute_gae(rewards: list[float], values: list[float], dones: list[bool], gamma: float, gae_lambda: float) -> list[float]:
@@ -21,8 +20,8 @@ def compute_gae(rewards: list[float], values: list[float], dones: list[bool], ga
 
 
 def ppo_update(actor: nn.Module, critic: nn.Module, optimizer_actor: torch.optim.Optimizer,
-    optimizer_critic: torch.optim.Optimizer, states: list, actions: list, old_log_probs: list,
-    returns: list, advantages: list, clip_epsilon: float, entropy_coeff: float, value_loss_coeff: float,
+    optimizer_critic: torch.optim.Optimizer, states: list, actions: torch.Tensor, old_log_probs: torch.Tensor,
+    returns: torch.Tensor, advantages: torch.Tensor, clip_epsilon: float, entropy_coeff: float, value_loss_coeff: float,
     clip_range_vf: float, max_grad_norm: float, target_kl: float) -> tuple[float, float, float, float]:
 
     actions = torch.tensor(actions)
@@ -32,7 +31,6 @@ def ppo_update(actor: nn.Module, critic: nn.Module, optimizer_actor: torch.optim
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
     probs = actor(states)
-    probs = pad_sequence(probs, batch_first=True)
     dist = Categorical(probs=probs)
     new_log_probs = dist.log_prob(actions)
     entropy = dist.entropy().mean()
@@ -107,7 +105,7 @@ def collect_trajectories(env: gym.Env, actor: nn.Module, critic: nn.Module, batc
     return states, actions, rewards, dones, log_probs, values, avg_reward
 
 
-def ppo(env: gym.Env, actor: nn.Module, critic: nn.Module, optimizer_actor: torch.optim.Optimizer,
+def train_ppo(env: gym.Env, actor: nn.Module, critic: nn.Module, optimizer_actor: torch.optim.Optimizer,
     optimizer_critic: torch.optim.Optimizer, batch_size: int, num_epochs: int, gamma: float,
     clip_epsilon: float, gae_lambda: float, entropy_coeff: float, value_loss_coeff: float,
     clip_range_vf: float, target_kl: float, max_grad_norm: float)-> tuple[nn.Module, nn.Module]:
@@ -181,6 +179,6 @@ if __name__ == "__main__":
     optimizer_actor = torch.optim.Adam(actor.parameters(), lr=3e-4)
     optimizer_critic = torch.optim.Adam(critic.parameters(), lr=1e-3)
 
-    ppo(env, actor, critic, optimizer_actor, optimizer_critic, 4096, 250,
+    train_ppo(env, actor, critic, optimizer_actor, optimizer_critic, 4096, 250,
         gamma=0.99, clip_epsilon=0.2, gae_lambda=0.95, entropy_coeff=0.01,
         value_loss_coeff=0.5, clip_range_vf=0.2, target_kl=0.03, max_grad_norm=0.5)

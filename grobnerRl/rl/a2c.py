@@ -2,8 +2,8 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 import gymnasium as gym
-
 from grobnerRl.rl.utils import plot_learning_process
+
 
 def compute_returns(rewards, dones, next_value, gamma, device):
     R = next_value
@@ -25,9 +25,9 @@ def rollout(env, policy, critic, n_steps, device):
     done = False
 
     for _ in range(n_steps):
-        state_tensor = torch.from_numpy(state).float().unsqueeze(0).to(device)
-        dist = policy(state_tensor)
-        value = critic(state_tensor).squeeze(0).squeeze(-1)
+        probs = policy(state)
+        value = critic(state).squeeze(0).squeeze(-1)
+        dist = torch.distributions.Categorical(probs=probs.to(device))
         action = dist.sample()
         log_prob = dist.log_prob(action).squeeze(-1)
         entropy = dist.entropy().squeeze(-1)
@@ -48,9 +48,7 @@ def rollout(env, policy, critic, n_steps, device):
     if done:
         next_value = 0.0
     else:
-        with torch.no_grad():
-            next_state_tensor = torch.from_numpy(state).float().unsqueeze(0).to(device)
-            next_value = critic(next_state_tensor).item()
+        next_value = critic(next_state).item()
 
     return log_probs, values, rewards, entropies, dones, next_value, sum(rewards)
 
@@ -76,6 +74,7 @@ def update_models(optimizer_policy, optimizer_critic, log_probs, values, returns
 
     return policy_loss.item(), critic_loss.item()
 
+
 def train_a2c(env, policy, critic, optimizer_policy, optimizer_critic,
               gamma: float, num_episodes: int, n_steps: int, entropy_coeff: float = 0.01):
     device = next(policy.parameters()).device
@@ -97,11 +96,11 @@ def train_a2c(env, policy, critic, optimizer_policy, optimizer_critic,
 
     plot_learning_process(episode_rewards, actor_losses, critic_losses)
 
+    return policy, critic
 
 
 if __name__ == "__main__":
     import torch.nn as nn
-    from torch.distributions import Categorical
 
     env = gym.make("CartPole-v1", max_episode_steps=1024)
 
@@ -114,12 +113,14 @@ if __name__ == "__main__":
             self.fc = nn.Sequential(
                 nn.Linear(obs_dim, 128),
                 nn.ReLU(),
-                nn.Linear(128, n_actions)
+                nn.Linear(128, n_actions),
+                nn.Softmax(dim=-1)
             )
 
         def forward(self, x):
-            logits = self.fc(x)
-            return Categorical(logits=logits)
+            x = torch.tensor(x, dtype=torch.float32)
+            probs = self.fc(x)
+            return probs
 
     class CriticNet(nn.Module):
         def __init__(self):
@@ -131,6 +132,7 @@ if __name__ == "__main__":
             )
 
         def forward(self, x):
+            x = torch.tensor(x, dtype=torch.float32)
             return self.fc(x)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
