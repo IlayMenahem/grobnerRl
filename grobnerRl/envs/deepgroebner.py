@@ -23,11 +23,9 @@ def tokenize(ideal: Sequence[PolyElement]) -> list[np.ndarray]:
     Parameters:
     ideal: list[PolyElement] - The ideal generators to be tokenized
 
-    Returns:
-    tokenized ideal
+    Returns: tokenized ideal
     '''
-    polys_monomials = [np.array(poly.monoms()) for poly in ideal]
-
+    polys_monomials = [np.concat((np.array(list(map(int, poly.coeffs()))).reshape((1, -1)).T, np.array(poly.monoms())), axis=1) for poly in ideal]
     return polys_monomials
 
 
