@@ -80,6 +80,17 @@ class Extractor(nn.Module):
         return values
 
 
+def apply_mask(vals, selectables):
+    mask = torch.full_like(vals, float('-inf'))
+    for i, j in selectables:
+        mask[i, j] = 0.0
+
+    vals = vals + mask
+    vals = vals.flatten()
+
+    return vals
+
+
 class GrobnerPolicy(nn.Module):
     extractor: Extractor
 
@@ -94,18 +105,34 @@ class GrobnerPolicy(nn.Module):
 
         ideal: list[list[torch.Tensor]] = obs[0]
         selectables: list[tuple[int,int]] = obs[1]
+
         vals = self.extractor(ideal)
-
-        mask = torch.full_like(vals, float('-inf'))
-        for i, j in selectables:
-            mask[i, j] = 0.0
-
-        vals = vals + mask
-        vals = vals.flatten()
+        vals = apply_mask(vals, selectables)
 
         probs = torch.softmax(vals, dim=0)
 
         return probs
+
+
+class GrobnerEvaluator(nn.Module):
+    extractor: Extractor
+
+    def __init__(self, extractor: Extractor):
+        super(GrobnerEvaluator, self).__init__()
+
+        self.extractor = extractor
+
+    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor|list[torch.Tensor]:
+        if isinstance(obs, list):
+            return pad_sequence([self.forward(o) for o in obs], batch_first=True)
+
+        ideal: list[list[torch.Tensor]] = obs[0]
+        selectables: list[tuple[int,int]] = obs[1]
+
+        vals = self.extractor(ideal)
+        vals = apply_mask(vals, selectables)
+
+        return vals
 
 
 class GrobnerCritic(nn.Module):
@@ -126,10 +153,10 @@ class GrobnerCritic(nn.Module):
             nn.Linear(ideal_encodeing_dim, 1)
         )
 
-    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor| list[torch.Tensor]:
+    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor|list[torch.Tensor]:
         if isinstance(obs, list):
-            values = [self.forward(o) for o in obs]
-            return torch.stack(values)
+            values = torch.stack([self.forward(o) for o in obs])
+            return values
 
         ideal, _ = obs
         ideal = [torch.Tensor(polynomial) for polynomial in ideal]
