@@ -7,15 +7,15 @@ from sympy.polys.domains import QQ
 def test_make_obs():
     R, x,y = ring("x,y", QQ, lex)
     f = x**2 + 2*x*y**2
-    g = x*y + 2*y**3 - 1
+    g = x*y + 3*y**3 - 1
     ideal = [f, g]
 
-    expected = [np.array([[2, 0],
-                         [1, 2]]),
+    expected = [np.array([[1, 2, 0],
+                         [2, 1, 2]]),
 
-                np.array([[1, 1],
-                         [0, 3],
-                         [0, 0]])]
+                np.array([[1, 1, 1],
+                         [3, 0, 3],
+                         [-1, 0, 0]])]
 
     obs = tokenize(ideal)
 

@@ -97,7 +97,7 @@ def reduce(g, F, lmF=None):
     return r, stats
 
 
-def update(G, P, f, strategy='optimal', lmG=None):
+def update(G, P, f, strategy='gebauermoeller', lmG=None):
     """Return the updated lists of polynomials and pairs when f is added to the basis G.
 
     The inputs G and P are modified by this function.

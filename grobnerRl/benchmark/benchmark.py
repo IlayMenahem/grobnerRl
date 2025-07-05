@@ -2,13 +2,12 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from grobnerRl.envs.ideals import random_ideal
-from grobnerRl.Buchberger.BuchbergerIlay import buchberger
-from grobnerRl.envs.deepgroebner import BuchbergerEnv, BuchbergerAgent
+from grobnerRl.envs.deepgroebner import BuchbergerEnv, BuchbergerAgent, buchberger
 from grobnerRl.benchmark.optimalReductions import optimal_reductions
 from typing import Optional
 
 
-def benchmark_game(strategy: str, ideal: list, step_limit: Optional[int] = None) -> tuple[list, int]:
+def benchmark_game(strategy: str, ideal: list, step_limit: Optional[int] = None) -> tuple[list, Optional[int]]:
     '''
     Simulates a single game of Buchberger's algorithm using the specified strategy.
 
@@ -25,15 +24,39 @@ def benchmark_game(strategy: str, ideal: list, step_limit: Optional[int] = None)
     '''
     basis, info = buchberger(ideal, selection=strategy, step_limit=step_limit)
 
-    if not info['valid']:
-        return [], None
-
-    steps: int = info['steps']
+    steps: int = info['total_reward']
 
     return basis, steps
 
 
-def benchmark_agent(strategy: str, num_episodes: int, step_limit: Optional[int], *ideal_params: list) -> None:
+def benchmark_assistanted_game(strategy: str, ideal, step_limit: Optional[int]) -> tuple[list, Optional[int]]:
+    '''
+    Benchmarks a given strategy for Buchberger's algorithm with the assistance of the
+    ideal generators being added one of the groebner basis generators.
+
+    Args:
+    - strategy (str): The selection strategy to use.
+    - num_episodes (int): The number of episodes to simulate.
+    - step_limit (Optional[int]): The maximum number of steps per game.
+    - *ideal_params (list): Parameters to be passed to `random_ideal` for generating ideals.
+
+    Returns: tuple[list, int]: A tuple containing:
+    - basis (list): The computed Gröbner basis.
+    - steps (int): The number of steps taken to compute the basis.
+    '''
+    basis, _ = buchberger(ideal, selection=strategy, step_limit=step_limit)
+
+    ideal = ideal + basis[-len(basis)//2:]
+
+    basis, info = buchberger(ideal, selection=strategy, step_limit=step_limit)
+
+    steps: int = info['total_reward']
+
+    return basis, steps
+
+
+def benchmark_agent(strategy: str, num_episodes: int, step_limit: Optional[int],
+    benchmark_game, generator, folder='figs') -> None:
     """
     Benchmarks a given strategy for Buchberger's algorithm over multiple episodes.
 
@@ -41,19 +64,20 @@ def benchmark_agent(strategy: str, num_episodes: int, step_limit: Optional[int],
     using the specified strategy. The distribution of step counts is then plotted.
 
     Args:
-        strategy (str): The selection strategy to use.
-        num_episodes (int): The number of episodes to simulate.
-        step_limit (Optional[int]): The maximum number of steps per game.
-        *ideal_params (list): Parameters to be passed to `random_ideal` for
-                             generating ideals.
+    strategy (str): The selection strategy to use.
+    num_episodes (int): The number of episodes to simulate.
+    step_limit (Optional[int]): The maximum number of steps per game.
+    generator (callable): A generator function that yields ideals.
+    folder (str): The folder where the plot will be saved. Default is 'figs'.
     """
     step_counts: list[int] = []
+
     for _ in range(num_episodes):
-        current_ideal: list = random_ideal(*ideal_params)
+        current_ideal: list = next(generator)
         _, step_count = benchmark_game(strategy, current_ideal, step_limit)
         step_counts.append(step_count)
 
-    plot_pdf(step_counts, strategy)
+    plot_pdf(step_counts, os.path.join(folder, strategy))
 
 
 def compare_agents(strategy1: str, strategy2: str, num_episodes: int, *ideal_params: list) -> None:
@@ -72,6 +96,7 @@ def compare_agents(strategy1: str, strategy2: str, num_episodes: int, *ideal_par
                              generating ideals.
     """
     step_diffs: list[int] = []
+
     for _ in range(num_episodes):
         current_ideal: list = random_ideal(*ideal_params)
         _, steps1 = benchmark_game(strategy1, current_ideal)
@@ -80,26 +105,6 @@ def compare_agents(strategy1: str, strategy2: str, num_episodes: int, *ideal_par
 
     plot_pdf(step_diffs, f'{strategy1}_vs_{strategy2}')
 
-
-def benchmark_agent_env(stratgy, ideal_dist, num_episodes: int, folder='figs'):
-    env = BuchbergerEnv(ideal_dist=ideal_dist)
-    agent = BuchbergerAgent(stratgy)
-
-    reward_counts: list[float] = []
-    for _ in range(num_episodes):
-        obs, _ = env.reset()
-        done = False
-        reward_sum: float = 0.0
-
-        while not done:
-            action = agent.act(obs)
-            obs, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-            reward_sum += reward
-
-        reward_counts.append(reward_sum)
-
-    plot_pdf(reward_counts, os.path.join(folder, f'{stratgy}_{ideal_dist}'))
 
 def display_obs(obs: tuple[list, list]) -> None:
     """

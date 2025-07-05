@@ -3,7 +3,7 @@
 import itertools as it
 import numpy as np
 import sympy as sp
-import scipy.stats
+import random
 import sympy
 
 
@@ -326,40 +326,36 @@ class RandomIdealGenerator(IdealGenerator):
 
 
 
-def random_polynomial(max_num_monoms, max_degree, vars, R):
-    poly = R.zero
+def random_polynomial(max_num_monoms, max_degree, vars, ring):
+    num_monoms = random.randint(1, max_num_monoms)
 
-    num_monoms = scipy.stats.randint.rvs(1, max_num_monoms)
-    for _ in range(num_monoms):
-        d = scipy.stats.randint.rvs(1, max_degree)
+    n = len(vars)
+    exponents_set = set()
+    # Keep sampling exponent‐tuples until we have enough distinct ones
+    while len(exponents_set) < num_monoms:
+        exps = [random.randint(0, max_degree) for _ in range(n)]
+        if sum(exps) > max_degree:
+            continue
+        exponents_set.add(tuple(exps))
 
-        exps = uniform_random_vector(vars, d)
+    # Build polynomial dictionary
+    poly_dict = {}
+    p = ring.domain.characteristic()
 
-        mon = R.one
-        for var, exponent in zip(vars, exps):
-            mon *= var**int(exponent)
+    for exps in exponents_set:
+        if p == 0:  # Infinite field like QQ
+            # pick a random integer coefficient
+            coeff = random.randint(-10, 10)
+            if coeff == 0:
+                coeff = 1  # Ensure nonzero coefficient
+        else:  # Finite field GF(p)
+            # pick a random nonzero coefficient in GF(p)
+            coeff = random.randint(1, p - 1)
 
-        coeff = scipy.stats.poisson.rvs(1) + 1
-        poly += coeff * mon
+        # Add to polynomial dictionary with exponents as key
+        poly_dict[exps] = coeff
 
-    return poly
-
-def uniform_random_vector(vars, d):
-    exps = []
-    num_v = len(vars)
-    current_monomial_degree = scipy.stats.randint.rvs(1, d+1)
-    cuts = sorted(scipy.stats.randint.rvs(1, current_monomial_degree + num_v, size=num_v - 1))
-
-    prev_cut = 0
-    for i in range(num_v - 1):
-        exp = cuts[i] - prev_cut - 1
-        if exp < 0:
-            exp = 0
-        exps.append(exp)
-        prev_cut = cuts[i]
-    exps.append((current_monomial_degree + num_v - 1) - prev_cut)
-
-    return exps
+    return ring.from_dict(poly_dict)
 
 def random_ideal(num_polys, max_num_monoms, max_degree, num_vars, field, order):
     R, vars = sympy.xring([f'x{i}' for i in range(num_vars)], field, order)

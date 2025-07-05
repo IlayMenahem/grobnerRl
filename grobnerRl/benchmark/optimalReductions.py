@@ -40,6 +40,7 @@ def optimal_reductions(ideal: list, step_limit: int):
     Returns:
         list: A list of selected pairs representing the reduction sequence.
         list: The Grobner basis of the ideal obtained by the sequence.
+        int: The number of steps taken to compute the basis.
     '''
 
     ring = ideal[0].ring
