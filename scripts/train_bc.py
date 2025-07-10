@@ -3,7 +3,7 @@ import torch
 from torch.utils.data import DataLoader
 from grobnerRl.data import BCDataset, bc_collate
 from grobnerRl.models import GrobnerPolicy, Extractor
-from grobnerRl.rl.bc import train_model, bc_loss, accuracy_fn
+from implementations.bc import train_model, bc_loss, accuracy_fn
 
 
 if __name__ == "__main__":

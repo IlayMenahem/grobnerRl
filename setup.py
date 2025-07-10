@@ -17,6 +17,7 @@ setup(
         'matplotlib',
         'sympy',
         'torch',
+        'implementations @ git+https://github.com/IlayMenahem/implementations',
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
