@@ -51,9 +51,9 @@ class Extractor(nn.Module):
 
         super(Extractor, self).__init__()
 
-        self.polynomial_embedder = DeepSetsEncoder(num_vars, monoms_embedding_dim, polys_embedding_dim, polys_embedding_dim)
+        self.polynomial_embedder = DeepSetsEncoder(num_vars+1, monoms_embedding_dim, polys_embedding_dim, polys_embedding_dim)
         self.ideal_transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(polys_embedding_dim, ideal_num_heads,  dropout=0.0, batch_first=True),
+            nn.TransformerEncoderLayer(polys_embedding_dim, ideal_num_heads, dim_feedforward=polys_embedding_dim, dropout=0.0, batch_first=True),
             num_layers=ideal_depth
         )
 
@@ -66,7 +66,7 @@ class Extractor(nn.Module):
         torch.Tensor - values of the selectable pairs, the non selectable pairs are
         set to -inf
         '''
-        _ideal = [torch.Tensor(polynomial) for polynomial in ideal]
+        _ideal = torch.tensor(np.array(ideal), dtype=torch.float32)
 
         # Embed polynomials
         polynomial_encodings = [self.polynomial_embedder(poly) for poly in _ideal]
@@ -114,11 +114,11 @@ class GrobnerPolicy(nn.Module):
         return probs
 
 
-class GrobnerEvaluator(nn.Module):
+class GrobnerCritic(nn.Module):
     extractor: Extractor
 
     def __init__(self, extractor: Extractor):
-        super(GrobnerEvaluator, self).__init__()
+        super(GrobnerCritic, self).__init__()
 
         self.extractor = extractor
 
@@ -135,65 +135,24 @@ class GrobnerEvaluator(nn.Module):
         return vals
 
 
-class GrobnerCritic(nn.Module):
-    polynomial_embedder: DeepSetsEncoder
-    ideal_encoder: DeepSetsEncoder
-    evaluator: nn.Module
-
-    def __init__(self, num_vars: int, monoms_embedding_dim: int, polys_embedding_dim: int,
-       ideal_encodeing_dim: int):
-        super(GrobnerCritic, self).__init__()
-
-        self.polynomial_embedder = DeepSetsEncoder(num_vars, monoms_embedding_dim, polys_embedding_dim, polys_embedding_dim)
-        self.ideal_encoder = DeepSetsEncoder(polys_embedding_dim, polys_embedding_dim, ideal_encodeing_dim, ideal_encodeing_dim)
-
-        self.evaluator = nn.Sequential(
-            nn.Linear(ideal_encodeing_dim, ideal_encodeing_dim),
-            nn.ReLU(),
-            nn.Linear(ideal_encodeing_dim, 1)
-        )
-
-    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor|list[torch.Tensor]:
-        if isinstance(obs, list):
-            values = torch.stack([self.forward(o) for o in obs])
-            return values
-
-        ideal, _ = obs
-        ideal = [torch.Tensor(polynomial) for polynomial in ideal]
-
-        # Embed polynomials
-        polynomial_encodings = [self.polynomial_embedder(poly) for poly in ideal]
-        polynomial_encodings = torch.stack(polynomial_encodings)
-
-        # Embed ideals
-        ideal_embeddings = self.ideal_encoder(polynomial_encodings)
-
-        # Evaluate the ideal
-        values = self.evaluator(ideal_embeddings)
-
-        return values
-
-
 if __name__ == "__main__":
     num_vars = 3
     num_monomials = 2
     monoms_embedding_dim = 32
     polys_embedding_dim = 64
-    polys_depth = 2
-    polys_num_heads = 4
     ideal_depth = 2
     ideal_num_heads = 4
 
     extractor_policy = Extractor(num_vars, monoms_embedding_dim, polys_embedding_dim,
-                          polys_depth, polys_num_heads, ideal_depth, ideal_num_heads)
+                          ideal_depth, ideal_num_heads)
     extractor_critic = Extractor(num_vars, monoms_embedding_dim, polys_embedding_dim,
-                            polys_depth, polys_num_heads, ideal_depth, ideal_num_heads)
+                            ideal_depth, ideal_num_heads)
 
     policy = GrobnerPolicy(extractor_policy)
     critic = GrobnerCritic(extractor_critic)
 
     # Using numpy arrays as per the forward method's type hint
-    ideal = [[np.random.randn(num_vars) for _ in range(num_monomials)] for i in range(1,4)]
+    ideal = [[np.random.randn(num_vars+1) for _ in range(num_monomials)] for i in range(1,4)]
     selectables = [(0, 1), (1, 2), (2, 0)]
 
     obs = (ideal, selectables)
@@ -202,9 +161,3 @@ if __name__ == "__main__":
     print(policy(obs))
     print("\nCritic output:")
     print(critic(obs))
-
-    twin_extractor = TwinExtractor(num_vars, num_monomials, polys_embedding_dim)
-    twin_policy = TwinPolicy(twin_extractor)
-
-    print("\nTwin Policy output:")
-    print(twin_policy(obs))
