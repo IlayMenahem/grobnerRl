@@ -66,7 +66,7 @@ class Extractor(nn.Module):
         torch.Tensor - values of the selectable pairs, the non selectable pairs are
         set to -inf
         '''
-        _ideal = torch.tensor(np.array(ideal), dtype=torch.float32)
+        _ideal = [torch.tensor(poly, dtype=torch.float32) for poly in ideal]
 
         # Embed polynomials
         polynomial_encodings = [self.polynomial_embedder(poly) for poly in _ideal]
@@ -114,11 +114,11 @@ class GrobnerPolicy(nn.Module):
         return probs
 
 
-class GrobnerCritic(nn.Module):
+class GrobnerValue(nn.Module):
     extractor: Extractor
 
     def __init__(self, extractor: Extractor):
-        super(GrobnerCritic, self).__init__()
+        super(GrobnerValue, self).__init__()
 
         self.extractor = extractor
 
@@ -133,6 +133,28 @@ class GrobnerCritic(nn.Module):
         vals = apply_mask(vals, selectables)
 
         return vals
+
+
+class GrobnerCritic(nn.Module):
+    extractor: Extractor
+
+    def __init__(self, extractor: Extractor):
+        super(GrobnerCritic, self).__init__()
+
+        self.extractor = extractor
+
+    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor:
+        if isinstance(obs, list):
+            return torch.tensor([self.forward(o) for o in obs], dtype=torch.float32)
+
+        ideal: list[list[torch.Tensor]] = obs[0]
+        selectables: list[tuple[int,int]] = obs[1]
+
+        vals = self.extractor(ideal)
+        vals = apply_mask(vals, selectables)
+        max_val = torch.max(vals)
+
+        return max_val
 
 
 if __name__ == "__main__":
@@ -153,7 +175,7 @@ if __name__ == "__main__":
 
     # Using numpy arrays as per the forward method's type hint
     ideal = [[np.random.randn(num_vars+1) for _ in range(num_monomials)] for i in range(1,4)]
-    selectables = [(0, 1), (1, 2), (2, 0)]
+    selectables = [(0, 1), (0, 2)]
 
     obs = (ideal, selectables)
 
