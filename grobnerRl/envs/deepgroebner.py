@@ -435,7 +435,7 @@ class BuchbergerEnv(gym.Env):
     def step(self, action: int|tuple[int,int]):
         """Perform one reduction and return the new polynomial list and pair list."""
         def int_action_to_pair(action: int) -> tuple[int, int]:
-            return (action % len(self.G), action // len(self.G))
+            return (action // len(self.G), action % len(self.G))
 
         if self.mode == 'train' and isinstance(action, (int, np.integer)):
             action = int_action_to_pair(action)
