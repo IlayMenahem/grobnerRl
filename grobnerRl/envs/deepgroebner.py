@@ -353,7 +353,8 @@ class BuchbergerAgent:
 
 
 class BuchbergerEnv(gym.Env):
-    """A Gymnasium environment for computing Groebner bases using Buchberger's algorithm.
+    """
+    A Gymnasium environment for computing Groebner bases using Buchberger's algorithm.
 
     This environment provides a reinforcement learning interface for the Groebner basis
     computation problem. At each step, the agent selects a pair of polynomials to
@@ -372,70 +373,7 @@ class BuchbergerEnv(gym.Env):
     sort_reducers : bool, optional
         Whether to choose reducers in sorted order by lead monomial.
     mode : {'train', 'eval'}, optional
-        Mode for the environment. In 'train' mode, actions are integers and
-        ideals are tokenized.
-
-    Examples
-    --------
-    >>> env = BuchbergerEnv()
-    >>> env.seed(123)
-    >>> env.reset()
-    ([x0**6*x1**4*x2**2 + 495 mod 32003*x0*x1**3*x2**3,
-      x1**16*x2**3 + 5901 mod 32003*x0**4*x2**7,
-      x0**18*x2**2 + 14384 mod 32003*x0**9*x1**7*x2**3,
-      x0**11*x2**8 + 16417 mod 32003*x0*x1**5*x2**6,
-      x0**3*x2**17 + 13109 mod 32003*x0**2*x1**9*x2**6,
-      x0**2*x1**4*x2**13 + 7422 mod 32003*x0**9*x2**7,
-      x0**6*x1**6*x2**5 + 7835 mod 32003*x0**10*x1**2*x2**4,
-      x0**2*x1**8*x2**6 + 5900 mod 32003*x0**3*x1,
-      x0**4*x1**10*x2**6 + 8221 mod 32003*x1**13*x2**4,
-      x0**2*x1**17 + 27672 mod 32003*x0**7*x1**2*x2**3],
-     [(0, 1),
-      (0, 2),
-      (0, 3),
-      (2, 3),
-      (3, 4),
-      (0, 5),
-      (4, 5),
-      (0, 6),
-      (0, 7),
-      (1, 7),
-      (5, 7),
-      (7, 8),
-      (0, 9),
-      (1, 9)])
-    >>> env.step((2, 3))
-    (([x0**6*x1**4*x2**2 + 495 mod 32003*x0*x1**3*x2**3,
-       x1**16*x2**3 + 5901 mod 32003*x0**4*x2**7,
-       x0**18*x2**2 + 14384 mod 32003*x0**9*x1**7*x2**3,
-       x0**11*x2**8 + 16417 mod 32003*x0*x1**5*x2**6,
-       x0**3*x2**17 + 13109 mod 32003*x0**2*x1**9*x2**6,
-       x0**2*x1**4*x2**13 + 7422 mod 32003*x0**9*x2**7,
-       x0**6*x1**6*x2**5 + 7835 mod 32003*x0**10*x1**2*x2**4,
-       x0**2*x1**8*x2**6 + 5900 mod 32003*x0**3*x1,
-       x0**4*x1**10*x2**6 + 8221 mod 32003*x1**13*x2**4,
-       x0**2*x1**17 + 27672 mod 32003*x0**7*x1**2*x2**3,
-       x0**4*x1**6*x2**10 + 12198 mod 32003*x0**3*x1**4*x2**7],
-      [(0, 1),
-       (0, 2),
-       (0, 3),
-       (3, 4),
-       (0, 5),
-       (4, 5),
-       (0, 6),
-       (0, 7),
-       (1, 7),
-       (5, 7),
-       (7, 8),
-       (0, 9),
-       (1, 9),
-       (0, 10),
-       (5, 10),
-       (7, 10)]),
-     -3.0,
-     False,
-     {})
-
+        Mode for the environment. In 'train' mode, actions are integers and ideals are tokenized.
     """
 
     def __init__(self, ideal_dist='3-20-10-uniform', elimination='gebauermoeller',
@@ -502,6 +440,18 @@ class BuchbergerEnv(gym.Env):
         if self.mode == 'train' and isinstance(action, (int, np.integer)):
             action = int_action_to_pair(action)
 
+        if action not in self.P:
+            observation = (self.G, self.P)
+            if self.mode == 'train':
+                observation = make_obs(*observation)
+
+            reward = -1.0
+            terminated = False
+            truncated = False
+            info = {'invalid_action': True}
+
+            return observation, reward, terminated, truncated, info
+
         i, j = action
 
         self.P.remove(action)
@@ -528,7 +478,7 @@ class BuchbergerEnv(gym.Env):
         reward = -(1.0 + stats['steps']) if self.rewards == 'additions' else -1.0
         terminated = len(self.P) == 0
         truncated = False
-        info = {}
+        info = {'steps': stats['steps'], 'reduction_was_zero': r == 0, 'invalid_action': False}
 
         return observation, reward, terminated, truncated, info
 
