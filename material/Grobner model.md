@@ -5,8 +5,21 @@
 Buchberger's algorithm which is used to computeing the Gröbner basis of an ideal has an arbitrary selection of which pair of polynomials to reduce, this selection has a large impact on the efficiency of the algorithm due to the fact fact that many pairs are reduced to zero (no advancement in the algorithm).
 we'd like to create a model which will choose the best pair of polynomials to reduce at each step of the algorithm to minimize the number of steps needed to compute the Gröbner basis.
 
-input - the generators of the ideal
-output - $\{i,j\}$ $i\neq j$ the indices of polynomials to reduce
+input - the generators of the ideal, and the reducible pairs of polynomials
+output - evaluation of the pair of polynomials to reduce
+
+example of input
+$p_0(x)=x_0^2 x_2^2 + 13466 x_0^3$
+$p_1(x)=x_0 x_1 x_2^2 + 17385 x_1^2 x_2^2$
+$p_2(x)=x_0^2 x_1 + 17034 x_2$
+$p_3(x)=x_0 x_1 x_2^2 + 5600 x_0^2 x_2$
+
+where $p_i(x_0, x_1, x_2) \in \mathbb{Z}_{32003}[x_0, x_1, x_2]$ are the generators of the ideal $I = \langle p_0, p_1, p_2, p_3 \rangle$.
+
+with reducible pairs
+(0, 1)
+(0, 2)
+(1, 3)
 
 utility function - the number of steps needed to compute the Gröbner basis.
 
@@ -14,17 +27,11 @@ utility function - the number of steps needed to compute the Gröbner basis.
 
 the input to the neural network will be
 
-- the generators of the ideal
+- the generators of the ideal - $\{\{m_{11},..., m_{1n_1}\}, \{m_{21},..., m_{2n_2}\}, ..., \{m_{k1},..., m_{kn_k}\}\}$ where $m_{ij}$ is the $j$-th monomial of the $i$-th polynomial, and $n_i$ is the number of monomials in the $i$-th polynomial.
 - a mask indicating which polynomials weren't already reduced to zero or were already reduced
-- the field of the ring
 
 ### data representation
 
-note - this data representation implies that we have a limited number of variables
-
-1. finitely generated ideals - the set of polynomials that generate the ideal
-2. polynomial - a set of monomials
-3. monomial - a vector of the power (int8) of each variable
 
 the ideals used to do [Algebraic Cryptanalysis Scheme of AES-256](https://onlinelibrary.wiley.com/doi/pdf/10.1155/2017/9828967) have 720 generators, of degree 254, with each monomial having a maximum of 10 variables.
 to store such ideals we'll use $2*10*254*720=3657600$ bytes, to store a batch of size
@@ -41,9 +48,8 @@ the reward would be the difference in a consistent heuristic.
 
 here are a few considerations for the model
 
-1. invariance to the order of the polynomials in the input set
-2. the naming of the variables shouldn't change the output
-3. the model should be able to accept a set of polynomials without restrictions on the number of polynomials, variables or the degree of the polynomials
+1. there should be respect to symetries of the input, the symetries are the order of the polynomials, monomials.
+2. the model should be able to accept a set of polynomials without restrictions on the number of polynomials, variables or the degree of the polynomials
 
 model structure
 
