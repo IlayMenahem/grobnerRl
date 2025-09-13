@@ -10,8 +10,6 @@ from typing import Sequence
 import bisect
 import numpy as np
 import gymnasium as gym
-from gymnasium import spaces
-
 from grobnerRl.envs.ideals import IdealGenerator, parse_ideal_dist
 
 
@@ -385,14 +383,6 @@ class BuchbergerEnv(gym.Env):
         self.rewards = rewards
         self.sort_input = sort_input
         self.sort_reducers = sort_reducers
-
-        num_vars = self.ideal_gen.ring.ngens
-
-        self.action_space = spaces.Box(low=0, high=np.inf, shape=(2,), dtype=np.int32)
-        self.observation_space = spaces.Tuple(
-            (spaces.Sequence(spaces.Sequence(spaces.Box(low=0, high=np.inf, shape=(num_vars, ), dtype=np.int32))),
-            spaces.Sequence(spaces.Box(low=0, high=np.inf, shape=(2,), dtype=np.int32)))
-        )
 
     def reset(self, seed=None, options=None):
         """Initialize the polynomial list and pair list for a new Groebner basis computation."""
