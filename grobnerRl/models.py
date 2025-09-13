@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 
@@ -66,7 +67,7 @@ class Extractor(nn.Module):
         torch.Tensor - values of the selectable pairs, the non selectable pairs are
         set to -inf
         '''
-        _ideal = [torch.tensor(poly, dtype=torch.float32) for poly in ideal]
+        _ideal = [torch.tensor(np.array(poly), dtype=torch.float32) for poly in ideal]
 
         # Embed polynomials
         polynomial_encodings = [self.polynomial_embedder(poly) for poly in _ideal]
@@ -92,9 +93,9 @@ def apply_mask(vals, selectables):
 
 
 class GrobnerPolicy(nn.Module):
-    extractor: Extractor
+    extractor: nn.Module
 
-    def __init__(self, extractor: Extractor):
+    def __init__(self, extractor: nn.Module):
         super(GrobnerPolicy, self).__init__()
 
         self.extractor = extractor
@@ -115,9 +116,9 @@ class GrobnerPolicy(nn.Module):
 
 
 class GrobnerValue(nn.Module):
-    extractor: Extractor
+    extractor: nn.Module
 
-    def __init__(self, extractor: Extractor):
+    def __init__(self, extractor: nn.Module):
         super(GrobnerValue, self).__init__()
 
         self.extractor = extractor
@@ -136,9 +137,9 @@ class GrobnerValue(nn.Module):
 
 
 class GrobnerCritic(nn.Module):
-    extractor: Extractor
+    extractor: nn.Module
 
-    def __init__(self, extractor: Extractor):
+    def __init__(self, extractor: nn.Module):
         super(GrobnerCritic, self).__init__()
 
         self.extractor = extractor
