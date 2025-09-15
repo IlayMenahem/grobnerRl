@@ -26,9 +26,9 @@ class DeepSetsEncoder(nn.Module):
         self.rho = nn.Sequential(
             nn.Linear(phi_hidden, rho_hidden),
             nn.ReLU(),
-            nn.Linear(rho_hidden, output_dim),
+            nn.Linear(rho_hidden, rho_hidden),
             nn.ReLU(),
-            nn.Linear(output_dim, output_dim)
+            nn.Linear(rho_hidden, output_dim)
         )
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor|None = None) -> torch.Tensor:
