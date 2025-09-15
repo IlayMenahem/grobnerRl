@@ -1,6 +1,5 @@
 import torch
 from torch import nn
-import torch.nn.functional as F
 import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 
@@ -79,7 +78,7 @@ class Extractor(nn.Module):
             num_layers=ideal_depth
         )
 
-    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor| list[torch.Tensor]:
+    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor:
         if isinstance(obs, list):
             return pad_sequence([self.forward(o) for o in obs], batch_first=True)
 
