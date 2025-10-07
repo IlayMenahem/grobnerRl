@@ -12,6 +12,9 @@ class DeepSetsEncoder(nn.Module):
     Internally it applies phi to each row, sums across the set dimension,
     then applies rho to the aggregated representation.
     """
+    phi: nn.Module
+    rho: nn.Module
+
     def __init__(self, input_dim: int, phi_hidden: int, rho_hidden: int, output_dim: int):
         super(DeepSetsEncoder, self).__init__()
         # phi: elementwise feature extractor
@@ -51,7 +54,7 @@ class DeepSetsEncoder(nn.Module):
         return res
 
 
-def apply_mask(vals, selectables):
+def apply_mask(vals: torch.Tensor, selectables: list[tuple[int,int]]) -> torch.Tensor:
     mask = torch.full_like(vals, float('-inf'))
 
     if selectables:
@@ -74,7 +77,7 @@ class Extractor(nn.Module):
 
         self.polynomial_embedder = DeepSetsEncoder(num_vars, monoms_embedding_dim, polys_embedding_dim, polys_embedding_dim)
         self.ideal_transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(polys_embedding_dim, ideal_num_heads, dim_feedforward=polys_embedding_dim, dropout=0.0, batch_first=True),
+            nn.TransformerEncoderLayer(polys_embedding_dim, ideal_num_heads, dim_feedforward=2*polys_embedding_dim, dropout=0.1, batch_first=True),
             num_layers=ideal_depth
         )
 
@@ -112,7 +115,7 @@ class GrobnerPolicy(nn.Module):
 
         self.extractor = extractor
 
-    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor| list[torch.Tensor]:
+    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor:
         vals = self.extractor(obs)
 
         if isinstance(obs, list):
@@ -131,7 +134,7 @@ class GrobnerValue(nn.Module):
 
         self.extractor = extractor
 
-    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor|list[torch.Tensor]:
+    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor:
         vals = self.extractor(obs)
 
         return vals
@@ -147,7 +150,7 @@ class GrobnerCritic(nn.Module):
 
     def forward(self, obs: tuple|list[tuple]) -> torch.Tensor:
         if isinstance(obs, list):
-            return torch.tensor([self.forward(o) for o in obs], dtype=torch.float32)
+            return torch.stack([self.forward(o) for o in obs])
 
         vals = self.extractor(obs)
         max_val = torch.max(vals)
