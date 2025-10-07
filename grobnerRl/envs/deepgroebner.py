@@ -4,11 +4,11 @@ An environment for computing Groebner bases with Buchberger's algorithm.
 credit to the authors of the deepgroebner paper
 """
 
+import numpy as np
 from copy import deepcopy
 from sympy.polys.rings import PolyElement
-from typing import Sequence
+from collections.abc import Sequence
 import bisect
-import numpy as np
 import gymnasium as gym
 from grobnerRl.envs.ideals import IdealGenerator, parse_ideal_dist
 
@@ -23,7 +23,8 @@ def tokenize(ideal: Sequence[PolyElement]) -> list[np.ndarray]:
 
     Returns: tokenized ideal
     '''
-    polys_monomials = [np.concat((np.array(list(map(int, poly.coeffs()))).reshape((1, -1)).T, np.array(poly.monoms())), axis=1) for poly in ideal]
+    polys_monomials = [poly.monoms() for poly in ideal]
+
     return polys_monomials
 
 
@@ -333,11 +334,12 @@ def buchberger(F, S=None, elimination='gebauermoeller', selection='normal', rewa
 
 
 class BuchbergerAgent:
-    """An agent that follows standard selection strategies.
+    """
+    An agent that follows standard selection strategies.
 
     Parameters
     ----------
-    selection : {'normal', 'first', 'degree', 'random'}
+    selection : {'normal', 'first', 'degree', 'random', 'degree_after_reduce'}
         The selection strategy used to pick pairs.
 
     """
@@ -623,3 +625,284 @@ class LeadMonomialsAgent:
             return np.argmin(np.sum(np.maximum(state[:, :n], state[:, m:m+n]), axis=1))
         elif self.strategy == 'random':
             return np.random.choice(len(state))
+
+
+class MCTSAgent:
+    """
+    An agent that uses MCTS (Monte Carlo Tree Search) to optimize pair selection.
+    
+    Parameters
+    ----------
+    env : BuchbergerEnv
+        The Buchberger environment to use for simulations.
+    n_simulations : int, optional
+        Number of MCTS simulations to run per action selection.
+    c : float, optional
+        Exploration constant for UCB1 formula.
+    gamma : float, optional
+        Discount factor for future rewards.
+    rollout_policy : str, optional
+        Policy to use for rollouts ('random', 'normal', 'degree', 'first').
+    """
+
+    def __init__(self, env, n_simulations=50, c=1.0, gamma=0.99, rollout_policy='normal'):
+        self.env = env
+        self.n_simulations = n_simulations
+        self.c = c
+        self.gamma = gamma
+        self.rollout_agent = BuchbergerAgent(selection=rollout_policy)
+
+    def act(self, state):
+        """
+        Select the best action using MCTS.
+        
+        Parameters
+        ----------
+        state : tuple
+            The current state (G, P) where G is the polynomial list and P is the pair set.
+            
+        Returns
+        -------
+        tuple
+            The selected pair (i, j) to reduce.
+        """
+        G, P = state
+        
+        if len(P) == 0:
+            return None
+        
+        if len(P) == 1:
+            return P[0]
+        
+        # Initialize root node and run simulations
+        root = MCTSNode(state=state, parent=None, action=None)
+        
+        for _ in range(self.n_simulations):
+            self._run_simulation(root, G, P)
+        
+        # Return the action with the highest visit count
+        return self._select_best_action(root)
+    
+    def _run_simulation(self, root, G, P):
+        """Run a single MCTS simulation from the root node."""
+        sim_env = self._copy_env_state(G, P)
+        node = root
+        
+        # Selection phase
+        node = self._select_node(node, sim_env)
+        
+        # Expansion phase
+        node = self._expand_node(node, sim_env)
+        
+        # Simulation phase (rollout)
+        total_reward = self._rollout(sim_env)
+        
+        # Backpropagation phase
+        self._backpropagate(node, total_reward)
+    
+    def _select_node(self, node, sim_env):
+        """
+        Selection phase: traverse tree using UCB1.
+        
+        Parameters
+        ----------
+        node : MCTSNode
+            The current node to start selection from.
+        sim_env : BuchbergerEnv
+            The simulation environment.
+            
+        Returns
+        -------
+        MCTSNode
+            The selected node for expansion.
+        """
+        while node.is_fully_expanded() and not node.is_terminal():
+            node = node.best_child(self.c)
+            _, _, terminated, truncated, _ = sim_env.step(node.action)
+            if terminated or truncated:
+                break
+        return node
+    
+    def _expand_node(self, node, sim_env):
+        """
+        Expansion phase: add a new child node.
+        
+        Parameters
+        ----------
+        node : MCTSNode
+            The node to expand from.
+        sim_env : BuchbergerEnv
+            The simulation environment.
+            
+        Returns
+        -------
+        MCTSNode
+            The newly created child node, or the original node if terminal.
+        """
+        if not node.is_terminal():
+            action = node.get_untried_action()
+            if action is not None:
+                obs, reward, terminated, truncated, info = sim_env.step(action)
+                child_state = obs if not (terminated or truncated) else None
+                node = node.add_child(action, child_state)
+        return node
+    
+    def _rollout(self, sim_env):
+        """
+        Simulation phase: rollout to terminal state using the rollout policy.
+        
+        Parameters
+        ----------
+        sim_env : BuchbergerEnv
+            The simulation environment.
+            
+        Returns
+        -------
+        float
+            The total discounted reward from the rollout.
+        """
+        total_reward = 0.0
+        discount = 1.0
+        terminated = False
+        truncated = False
+        
+        while not (terminated or truncated):
+            if len(sim_env.P) == 0:
+                break
+            
+            # Use BuchbergerAgent for rollout policy
+            state = (sim_env.G, sim_env.P)
+            action = self.rollout_agent.act(state)
+            
+            _, reward, terminated, truncated, _ = sim_env.step(action)
+            total_reward += discount * reward
+            discount *= self.gamma
+        
+        return total_reward
+    
+    def _backpropagate(self, node, total_reward):
+        """
+        Backpropagation phase: update node statistics up the tree.
+        
+        Parameters
+        ----------
+        node : MCTSNode
+            The node to start backpropagation from.
+        total_reward : float
+            The total reward to backpropagate.
+        """
+        while node is not None:
+            node.visits += 1
+            node.value += total_reward
+            node = node.parent
+    
+    def _select_best_action(self, root):
+        """
+        Select the best action from the root node.
+        
+        Parameters
+        ----------
+        root : MCTSNode
+            The root node of the MCTS tree.
+            
+        Returns
+        -------
+        tuple
+            The best action based on visit counts.
+        """
+        if not root.children:
+            return None
+        best_child = max(root.children, key=lambda c: c.visits)
+        return best_child.action
+    
+    def _copy_env_state(self, G, P):
+        """Create a copy of the environment with the current state."""
+        # Create a new environment instance
+        env_copy = BuchbergerEnv(
+            ideal_dist=self.env.ideal_gen,
+            elimination=self.env.elimination,
+            rewards=self.env.rewards,
+            sort_input=self.env.sort_input,
+            sort_reducers=self.env.sort_reducers,
+            mode=self.env.mode
+        )
+        
+        # Copy the state
+        env_copy.G = [g.copy() for g in G]
+        env_copy.lmG = [g.LM for g in env_copy.G]
+        env_copy.P = P.copy()
+        env_copy.order = G[0].ring.order if G else None
+        
+        if self.env.sort_reducers:
+            env_copy.G_ = [g.copy() for g in self.env.G_]
+            env_copy.lmG_ = [g.LM for g in env_copy.G_]
+            env_copy.keysG_ = self.env.keysG_.copy()
+        else:
+            env_copy.G_ = env_copy.G
+            env_copy.lmG_ = env_copy.lmG
+        
+        return env_copy
+
+
+class MCTSNode:
+    """
+    A node in the MCTS tree.
+    
+    Parameters
+    ----------
+    state : tuple or None
+        The state (G, P) at this node.
+    parent : MCTSNode or None
+        The parent node.
+    action : tuple or None
+        The action that led to this node.
+    """
+    
+    def __init__(self, state, parent, action):
+        self.state = state
+        self.parent = parent
+        self.action = action
+        self.children = []
+        self.visits = 0
+        self.value = 0.0
+        self.untried_actions = list(state[1]) if state is not None else []
+    
+    def is_fully_expanded(self):
+        """Check if all actions from this node have been tried."""
+        return len(self.untried_actions) == 0
+    
+    def is_terminal(self):
+        """Check if this is a terminal node (no more pairs to reduce)."""
+        return self.state is None or len(self.state[1]) == 0
+    
+    def get_untried_action(self):
+        """Get an untried action from this node."""
+        if len(self.untried_actions) > 0:
+            return self.untried_actions.pop(0)
+        return None
+    
+    def add_child(self, action, state):
+        """Add a child node for the given action and state."""
+        child = MCTSNode(state=state, parent=self, action=action)
+        self.children.append(child)
+        return child
+    
+    def best_child(self, c):
+        """
+        Select the best child using UCB1 formula.
+        
+        Parameters
+        ----------
+        c : float
+            Exploration constant.
+            
+        Returns
+        -------
+        MCTSNode
+            The child with the highest UCB1 value.
+        """
+        return max(
+            self.children,
+            key=lambda child: (child.value / child.visits if child.visits > 0 else 0) +
+                            c * np.sqrt(np.log(self.visits) / child.visits if child.visits > 0 else float('inf'))
+        )
