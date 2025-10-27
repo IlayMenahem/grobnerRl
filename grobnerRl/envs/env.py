@@ -1,0 +1,396 @@
+'''
+implementation of deep buchberger environment with gaubmoller criteria, f4, and f5
+'''
+
+from collections import defaultdict
+from copy import deepcopy
+from collections.abc import Sequence
+
+import gymnasium as gym
+from sympy.polys.rings import PolyElement
+import numpy as np
+
+from grobnerRl.envs.ideals import IdealGenerator
+
+
+def tokenize(ideal: Sequence[PolyElement]) -> list[np.ndarray]:
+    '''
+    takes an ideal and returns a tokenized version of it, a list of arrays, each of the arrays
+    representing a polynomial monomials
+
+    Parameters:
+    ideal: list[PolyElement] - The ideal generators to be tokenized
+
+    Returns: tokenized ideal
+    '''
+    try:
+        polys_monomials = [np.concat((np.array(list(map(int, poly.coeffs()))).reshape((1, -1)).T, np.array(poly.monoms())), axis=1) for poly in ideal]
+    except ValueError as e:
+        print("Error tokenizing ideal:")
+        for poly in ideal:
+            print(f"Polynomial: {poly}, Coeffs: {poly.coeffs()}, Monoms: {poly.monoms()}")
+
+        raise e
+
+    return polys_monomials
+
+
+def make_obs(G, P) -> tuple[list[np.ndarray], list[tuple[int, int]]]:
+    P = deepcopy(P)
+    G = tokenize(G)
+
+    return G, P
+
+
+def spoly(f: PolyElement, g: PolyElement) -> PolyElement:
+    '''
+    Compute the S-polynomial of f and g.
+    
+    Args:
+    - f: A polynomial.
+    - g: A polynomial.
+
+    Returns:
+    - The S-polynomial of f and g.
+    '''
+    lmf = f.LM
+    lmg = g.LM
+    
+    R = f.ring
+    lcm = R.monomial_lcm(lmf, lmg)
+    
+    s1 = f.mul_monom(R.monomial_div(lcm, lmf))
+    s2 = g.mul_monom(R.monomial_div(lcm, lmg))
+    
+    return s1 - s2
+
+
+def reduce(g: PolyElement, F: list[PolyElement]) -> tuple[PolyElement, dict]:
+    """
+    Return a remainder and stats when g is divided by monic polynomials F.
+
+    Args:
+    - g: Dividend polynomial.
+    - F: List of monic divisor polynomials.
+
+    Returns:
+    A tuple containing:
+    - Remainder polynomial
+    - Dictionary with statistics (e.g., 'steps': number of reduction steps)
+
+    Example:
+        >>> import sympy as sp
+        >>> R, a, b, c, d = sp.ring('a,b,c,d', sp.QQ, 'lex')
+        >>> reduce(a**3*b*c**2 + a**2*c, [a**2 + b, a*b*c + c, a*c**2 + b**2])
+        (b*c**2 - b*c, {'steps': 3})
+    """
+    
+    ring = g.ring
+    monomial_div = ring.monomial_div
+    lmF = [f.LM for f in F]
+
+    stats = {'steps': 0}
+    r = ring.zero
+    h = g.copy()
+
+    while h:
+        lmh, lch = h.LT
+        found_divisor = False
+
+        for f, lmf in zip(F, lmF):
+            m = monomial_div(lmh, lmf)
+            if m is not None:
+                h = h - f.mul_term((m, lch))
+                found_divisor = True
+                stats['steps'] += 1
+                break
+
+        if not found_divisor:
+            if lmh in r:
+                r[lmh] += lch
+            else:
+                r[lmh] = lch
+            del h[lmh]
+
+    return r, stats
+
+
+def update(G: list[PolyElement], P: list[tuple[int, int]], f: PolyElement) -> tuple[list[PolyElement], list[tuple[int, int]]]:
+    """
+    Return the updated lists of polynomials and pairs when f is added to the basis G.
+
+    The inputs G and P are modified by this function.
+
+    Args:
+    - G: Current list of polynomial generators.
+    - P: Current list of s-pairs.
+    - f: New polynomial to add to the basis.
+
+    Returns:
+    A tuple containing:
+    - Updated list of polynomial generators
+    - Updated list of s-pairs
+    """
+
+    lmf = f.LM
+    R = f.ring
+    lcm = R.monomial_lcm
+    mul = R.monomial_mul
+    div = R.monomial_div
+
+    lmG = [g.LM for g in G]
+    new_index = len(G)
+
+    def is_chain_redundant(pair: tuple[int, int]) -> bool:
+        i, j = pair
+        gamma = lcm(lmG[i], lmG[j])
+        if div(gamma, lmf) is None:
+            return False
+        return gamma != lcm(lmG[i], lmf) and gamma != lcm(lmG[j], lmf)
+
+    def is_lcm_redundant(pair: tuple[int, int]) -> bool:
+        i, j = pair
+        return lcm(lmG[i], lmG[j]) == mul(lmG[i], lmG[j])
+
+    P[:] = [pair for pair in P if not (is_lcm_redundant(pair) or is_chain_redundant(pair))]
+
+    indices_by_lcm = defaultdict(list)
+    for idx, lm in enumerate(lmG):
+        indices_by_lcm[lcm(lm, lmf)].append(idx)
+
+    minimal_lcms = []
+    new_pairs = []
+    for gamma in sorted(indices_by_lcm, key=R.order):
+        if any(div(gamma, existing) is not None for existing in minimal_lcms):
+            continue
+        minimal_lcms.append(gamma)
+
+        if any(lcm(lmG[i], lmf) == mul(lmG[i], lmf) for i in indices_by_lcm[gamma]):
+            continue
+        new_pairs.append((indices_by_lcm[gamma][0], new_index))
+
+    new_pairs.sort(key=lambda pair: pair[0])
+
+    G.append(f)
+    P.extend(new_pairs)
+
+    return G, P
+
+
+def minimalize(G: list[PolyElement]) -> list[PolyElement]:
+    '''
+    Return the minimal Groebner basis from Groebner basis G.
+    
+    Args:
+    - G: A Groebner basis.
+
+    Returns:
+    - The minimal Groebner basis.
+    '''
+
+    R = G[0].ring if len(G) > 0 else None
+    Gmin = []
+    for f in sorted(G, key=lambda h: R.order(h.LM)):
+        if all(not R.monomial_div(f.LM, g.LM) for g in Gmin):
+            Gmin.append(f)
+    
+    return Gmin
+
+
+def interreduce(G):
+    '''
+    Return the interreduced Groebner basis from Groebner basis G.
+    
+    Args:
+    - G: A Groebner basis.
+    
+    Returns:
+    - The interreduced Groebner basis.
+    '''
+    
+    return [G[i].rem(G[:i] + G[i+1:]).monic() for i in range(len(G))]
+
+
+def select(G: list[PolyElement], P: list[tuple[int, int]], strategy='normal') -> tuple[int, int]:
+    '''
+    Select and return a pair from P.
+    
+    Args:
+    - G: List of polynomial generators.
+    - P: List of s-pairs.
+    - strategy: Selection strategy ('first', 'normal', 'degree', 'random', 'degree_after_reduce', or list of these)
+
+    Returns:
+    - Selected pair (i, j) from P.
+    '''
+
+    if not len(G) > 0:
+        raise ValueError('polynomial list must be nonempty')
+
+    if not len(P) > 0:
+        raise ValueError('pair set must be nonempty')
+
+    R = G[0].ring
+
+    if isinstance(strategy, str):
+        strategy = [strategy]
+
+    def strategy_key(p, s):
+        """Return a sort key for pair p in the strategy s."""
+
+        if s == 'first':
+            return p[1], p[0]
+        elif s == 'normal':
+            lcm = R.monomial_lcm(G[p[0]].LM, G[p[1]].LM)
+            return R.order(lcm)
+        elif s == 'degree':
+            lcm = R.monomial_lcm(G[p[0]].LM, G[p[1]].LM)
+            return sum(lcm)
+        elif s == 'random':
+            return np.random.rand()
+        elif s == 'degree_after_reduce':
+            after_red, _ = reduce(spoly(G[p[0]], G[p[1]]), G)
+
+            if after_red == 0:
+                return (np.inf, ())
+
+            return R.order(after_red.LM)
+        else:
+            raise ValueError('unknown selection strategy')
+
+    return min(P, key=lambda p: tuple(strategy_key(p, s) for s in strategy))
+
+
+def buchberger(G: list[PolyElement]) -> tuple[list[PolyElement], dict]:
+    '''
+    Compute the Groebner basis of the ideal generated by G using Buchberger's algorithm.
+
+    Args:
+    - G: List of polynomial generators.
+
+    Returns:
+    - Tuple where the first element is a minimal, interreduced Groebner basis of the
+      ideal generated by G, and the second element is a dictionary with run statistics.
+    '''
+
+    if not G:
+        return [], {
+            'zero_reductions': 0,
+            'nonzero_reductions': 0,
+            'total_reduction_steps': 0,
+            'pairs_processed': 0,
+        }
+
+    basis: list[PolyElement] = []
+    pairs: list[tuple[int, int]] = []
+
+    for poly in G:
+        update(basis, pairs, poly.monic())
+
+    stats = {
+        'zero_reductions': 0,
+        'nonzero_reductions': 0,
+        'total_reduction_steps': 0,
+        'pairs_processed': 0,
+    }
+
+    while pairs:
+        i, j = select(basis, pairs)
+        pairs.remove((i, j))
+        stats['pairs_processed'] += 1
+
+        s_poly = spoly(basis[i], basis[j])
+        remainder, reduction_stats = reduce(s_poly, basis)
+        stats['total_reduction_steps'] += reduction_stats.get('steps', 0)
+
+        if remainder != 0:
+            stats['nonzero_reductions'] += 1
+            update(basis, pairs, remainder.monic())
+        else:
+            stats['zero_reductions'] += 1
+
+    reduced_basis = minimalize(basis)
+    reduced_basis = interreduce(reduced_basis) if reduced_basis else []
+
+    return reduced_basis, stats
+
+
+class BuchbergerEnv(gym.Env):
+    generators: list[PolyElement]
+    pairs: list[tuple[int, int]]
+
+    def __init__(self, ideal_generator: IdealGenerator, mode='eval'):
+        '''
+        Initialize the Buchberger environment.
+        
+        Parameters:
+        ideal_generator: IdealGenerator - Generator for ideals to be used in the environment.
+        mode: str - Mode of the environment ('train' or 'eval').
+        '''
+        super().__init__()
+        self.ideal_generator = ideal_generator
+        self.mode = mode
+
+        self.generators = []
+        self.pairs = []
+    
+    def reset(self, seed = None, options = None):
+        '''
+        Reset the environment to start a new episode.
+
+        Parameters:
+        seed: Optional seed for random number generation.
+        options: Optional additional options.
+        
+        Returns:
+        observation: The initial observation for the environment.
+        info: Additional information about the environment state.
+        '''
+        generators = next(self.ideal_generator)
+
+        for g in generators:
+            if g != 0:
+                self.generators, self.pairs = update(self.generators, self.pairs, g.monic())
+
+        observation = (self.generators, self.pairs)
+        if self.mode == 'train':
+            observation = make_obs(*observation)
+
+        return observation, {}
+
+    def step(self, action: int | tuple[int, int]):
+        '''
+        Take a step in the environment based on the given action.
+
+        Parameters:
+        action: int | tuple[int, int] - The action to take (either an integer or a pair of indices).
+
+        Returns:
+        observation: The new observation after taking the action.
+        reward: The reward received after taking the action.
+        terminated: Boolean indicating if the episode has terminated.
+        truncated: Boolean indicating if the episode has been truncated.
+        info: Additional information about the environment state.
+        '''
+
+        def int_to_pair(action: int) -> tuple[int, int]:
+            return (action // len(self.generators), action % len(self.generators))
+
+        if isinstance(action, int):
+            action = int_to_pair(action)
+
+        # Compute the S-polynomial, and if non-zero after reduction, update the basis
+        poly = spoly(self.generators[action[0]], self.generators[action[1]])
+        poly, _ = reduce(poly, self.generators)
+        if poly != 0:
+            self.generators, self.pairs = update(self.generators, self.pairs, poly.monic())
+
+        reward = -1
+        terminated = len(self.pairs) == 0
+        truncated = False
+
+        observation = (self.generators, self.pairs)
+        if self.mode == 'train':
+            observation = make_obs(*observation)
+        
+        return observation, reward, terminated, truncated, {}
