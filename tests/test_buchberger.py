@@ -2,10 +2,9 @@
 
 import pytest
 import sympy as sp
-import numpy as np
 
-from grobnerRl.envs.deepgroebner import (spoly, reduce, select, update, minimalize, interreduce, lead_monomials_vector,
-    buchberger, BuchbergerEnv, BuchbergerAgent, LeadMonomialsAgent, LeadMonomialsEnv)
+from grobnerRl.envs.deepgroebner import (spoly, reduce, select, update, minimalize, interreduce,
+    buchberger, BuchbergerEnv, BuchbergerAgent)
 from grobnerRl.envs.ideals import FixedIdealGenerator
 
 
@@ -308,72 +307,3 @@ def test_episode_2(s, reward):
     env = BuchbergerEnv(ideal_gen, rewards='reductions')
     agent = BuchbergerAgent(selection=s)
     assert run_episode(agent, env) == reward
-
-@pytest.mark.parametrize("f, ring, k, v", [
-    (R1.one, R1, 1, [0, 0, 0]),
-    (R2.zero, R2, 2, [0, 0, 0, 0, 0, 0, 0, 0]),
-    (x*y, R1, 1, [1, 1, 0]),
-    (x*y, R1, 3, [1, 1, 0, 0, 0, 0, 0, 0, 0]),
-    (x*y**2*z + x**3 + z + 1, R1, 1, [1, 2, 1]),
-    (x*y**2*z + x**3 + z + 1, R1, 2, [1, 2, 1, 3, 0, 0]),
-    (x*y**2*z + x**3 + z + 1, R1, 4, [1, 2, 1, 3, 0, 0, 0, 0, 1, 0, 0, 0]),
-    (b*d**5 + a**3, R2, 1, [3, 0, 0, 0]),
-    (b*d**5 + a**3, R2, 3, [3, 0, 0, 0, 0, 1, 0, 5, 0, 0, 0, 0]),
-    (u**3*v + t**2, R3, 1, [0, 3, 1]),
-    (u**3*v + t**2, R3, 2, [0, 3, 1, 2, 0, 0]),
-])
-def test_lead_monomials_vector(f, ring, k, v):
-    assert np.array_equal(lead_monomials_vector(f, ring, k=k), np.array(v))
-
-
-def test_LeadMonomialsEnv_0():
-    R, x, y, z = sp.ring('x,y,z', sp.FF(101), 'grevlex')
-    F = [y - x**2, z - x**3]
-    ideal_gen = FixedIdealGenerator(F)
-    env = LeadMonomialsEnv(ideal_gen, elimination='none')
-    state, _ = env.reset()
-    assert np.array_equal(state, np.array([[2, 0, 0, 3, 0, 0]]))
-    state, _, done, _, _ = env.step(0)
-    assert (np.array_equal(state, np.array([[2, 0, 0, 1, 1, 0], [3, 0, 0, 1, 1, 0]])) or
-            np.array_equal(state, np.array([[3, 0, 0, 1, 1, 0], [2, 0, 0, 1, 1, 0]])))
-    assert not done
-    action = 0 if np.array_equal(state[0], np.array([3, 0, 0, 1, 1, 0])) else 1
-    state, _, done, _, _ = env.step(action)
-    assert np.array_equal(state, np.array([[2, 0, 0, 1, 1, 0]]))
-    assert not done
-    for _ in range(4):
-        state, _, done, _, _ = env.step(0)
-    assert done
-
-
-def test_LeadMonomialsEnv_1():
-    R, x, y, z = sp.ring('x,y,z', sp.FF(101), 'grevlex')
-    F = [y - x**2, z - x**3]
-    ideal_gen = FixedIdealGenerator(F)
-    env = LeadMonomialsEnv(ideal_gen)
-    state, _ = env.reset()
-    assert np.array_equal(state, np.array([[2, 0, 0, 3, 0, 0]]))
-    state, _, done, _, _ = env.step(0)
-    assert np.array_equal(state, np.array([[2, 0, 0, 1, 1, 0]]))
-    assert not done
-    state, _, done, _, _ = env.step(0)
-    assert np.array_equal(state, np.array([[1, 1, 0, 0, 2, 0]]))
-    assert not done
-    state, _, done, _, _ = env.step(0)
-    assert done
-
-
-@pytest.mark.parametrize("selection, k, action", [
-    ('degree', 1, 2),
-    ('degree', 2, 1),
-    ('first', 1, 0),
-    ('first', 2, 0),
-])
-def test_LeadMonomialsAgent(selection, k, action):
-    agent = LeadMonomialsAgent(selection=selection, k=k)
-    state = np.array([[11,  1,  2,  7,  2,  5,  5, 12,  2,  0,  1,  2],
-                      [ 1, 17,  0,  1,  5, 10,  0, 16,  3,  1, 10,  7],
-                      [ 0,  8,  7,  9,  0,  2,  5, 12,  2,  0,  1,  2],
-                      [ 0,  8,  7,  9,  0,  2,  0, 16,  3,  1, 10,  7],
-                      [11,  1,  2,  7,  2,  5,  0,  0, 12,  9,  0,  2]])
-    assert agent.act(state) == action

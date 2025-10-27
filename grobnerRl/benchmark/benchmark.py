@@ -1,36 +1,7 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-from grobnerRl.envs.ideals import random_ideal
-from grobnerRl.envs.deepgroebner import buchberger
-from grobnerRl.benchmark.optimalReductions import optimal_reductions
 from typing import Optional
-
-
-def benchmark_assistanted_game(strategy: str, ideal, step_limit: Optional[int]) -> tuple[list, Optional[int]]:
-    '''
-    Benchmarks a given strategy for Buchberger's algorithm with the assistance of the
-    ideal generators being added one of the groebner basis generators.
-
-    Args:
-    - strategy (str): The selection strategy to use.
-    - num_episodes (int): The number of episodes to simulate.
-    - step_limit (Optional[int]): The maximum number of steps per game.
-    - *ideal_params (list): Parameters to be passed to `random_ideal` for generating ideals.
-
-    Returns: tuple[list, int]: A tuple containing:
-    - basis (list): The computed Gröbner basis.
-    - steps (int): The number of steps taken to compute the basis.
-    '''
-    basis, _ = buchberger(ideal, selection=strategy, step_limit=step_limit)
-
-    ideal = ideal + basis[-len(basis)//2:]
-
-    basis, info = buchberger(ideal, selection=strategy, step_limit=step_limit)
-
-    steps: int = info['total_reward']
-
-    return basis, steps
 
 
 def benchmark_agent(agent, num_episodes: int, env, folder='figs', agent_name: Optional[str] = None) -> None:
@@ -133,32 +104,4 @@ def plot_pdf(step_counts: list, strategy_name: str) -> None:
     plt.close()
 
 
-def optimal_vs_standard(num_episodes: int, *ideal_params: list) -> None:
-    '''
-    compare the optimal reductions with the standard Buchberger's algorithm
-    '''
-    points: list[tuple[int,int]] = []
-    optimal_fail: int = 0
 
-    for _ in range(num_episodes):
-        ideal = random_ideal(*ideal_params)
-        _, reds, _ = optimal_reductions(ideal, 10000)
-        _, normal_reds = buchberger(ideal)
-
-        if not reds:
-            optimal_fail += 1
-            continue
-
-        if len(reds) > len(normal_reds):
-            print('problematic ideal')
-            display_obs((ideal, []))
-
-        points.append((len(reds), len(normal_reds)))
-
-    print(f'optimal reductions failed {optimal_fail} times')
-
-    plt.scatter(*zip(*points), alpha=0.5)
-    plt.xlabel('optimal reductions')
-    plt.ylabel('standard reductions')
-    plt.savefig(os.path.join('figs', 'optimal_vs_standard.png'))
-    plt.close()
