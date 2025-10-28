@@ -315,6 +315,200 @@ def buchberger(G: list[PolyElement]) -> tuple[list[PolyElement], dict]:
     return reduced_basis, stats
 
 
+def GVW_buchberger(G: list[PolyElement]) -> tuple[list[PolyElement], list[tuple[tuple[int, ...], int]]]:
+    '''
+    Compute a Groebner basis using the GVW signature-based Buchberger algorithm with the g2 module order.
+
+    Args:
+    - G: List of polynomial generators.
+
+    Returns:
+    - Tuple where the first element is a minimal, interreduced Groebner basis and the second element is a
+      list of leading module terms of discovered syzygies (each encoded as (monomial, index)).
+    '''
+
+    if not G:
+        return [], []
+
+    # Prepare the input: discard zeros, store monic copies, and cache leading monomials for ordering.
+    inputs: list[PolyElement] = []
+    for poly in G:
+        if poly != 0:
+            inputs.append(poly.monic())
+
+    if not inputs:
+        return [], []
+
+    ring = inputs[0].ring
+    order = ring.order
+    mul = ring.monomial_mul
+    div = ring.monomial_div
+    lcm = ring.monomial_lcm
+    ngens = ring.ngens
+    zero_monom = (0,) * ngens
+    initial_lms = [poly.LM for poly in inputs]
+
+    def signature_mul(signature: tuple[tuple[int, ...], int], mon: tuple[int, ...]) -> tuple[tuple[int, ...], int]:
+        return (mul(signature[0], mon), signature[1])
+
+    def signature_key(signature: tuple[tuple[int, ...], int]) -> tuple:
+        mon, idx = signature
+        lead = mul(mon, initial_lms[idx])
+        return (order(lead), idx, order(mon))
+
+    def signature_lt(left: tuple[tuple[int, ...], int], right: tuple[tuple[int, ...], int]) -> bool:
+        return signature_key(left) < signature_key(right)
+
+    def signature_divides(base: tuple[tuple[int, ...], int], target: tuple[tuple[int, ...], int]) -> bool:
+        if base[1] != target[1]:
+            return False
+        return div(target[0], base[0]) is not None
+
+    def remove_multiples(jpairs: list[tuple[tuple[tuple[int, ...], int], PolyElement]],
+                         signatures: list[tuple[tuple[int, ...], int]]) -> list[tuple[tuple[tuple[int, ...], int], PolyElement]]:
+        if not signatures:
+            return jpairs
+        filtered: list[tuple[tuple[tuple[int, ...], int], PolyElement]] = []
+        for sig, poly in jpairs:
+            if any(signature_divides(blocker, sig) for blocker in signatures):
+                continue
+            filtered.append((sig, poly))
+        return filtered
+
+    U: list[tuple[tuple[int, ...], int]] = []
+    V: list[PolyElement] = []
+    H: set[tuple[tuple[int, ...], int]] = set()
+    JP: list[tuple[tuple[tuple[int, ...], int], PolyElement]] = [((zero_monom, idx), poly) for idx, poly in enumerate(inputs)]
+
+    def select_min_signature() -> int:
+        min_idx = 0
+        min_key = signature_key(JP[0][0])
+        for idx in range(1, len(JP)):
+            key = signature_key(JP[idx][0])
+            if key < min_key:
+                min_idx = idx
+                min_key = key
+        return min_idx
+
+    def regular_top_reduce(signature: tuple[tuple[int, ...], int], poly: PolyElement) -> PolyElement:
+        if not U:
+            return poly
+
+        while poly != 0:
+            lm_poly, lc_poly = poly.LT
+            reduced = False
+            for sig_reducer, reducer in zip(U, V):
+                mult = div(lm_poly, reducer.LM)
+                if mult is None:
+                    continue
+                sig_mult = signature_mul(sig_reducer, mult)
+                if signature_lt(sig_mult, signature):
+                    ratio = lc_poly / reducer.LC
+                    poly = poly - reducer.mul_term((mult, ratio))
+                    reduced = True
+                    break
+            if not reduced:
+                break
+        return poly
+
+    def is_super_top_reducible(signature: tuple[tuple[int, ...], int], poly: PolyElement) -> bool:
+        if not U or poly == 0:
+            return False
+        lm_poly = poly.LM
+        for sig_reducer, reducer in zip(U, V):
+            mult = div(lm_poly, reducer.LM)
+            if mult is None:
+                continue
+            if signature_mul(sig_reducer, mult) == signature:
+                return True
+        return False
+
+    def add_j_pair(signature: tuple[tuple[int, ...], int], poly: PolyElement) -> None:
+        if any(signature_divides(blocker, signature) for blocker in H):
+            return
+        poly_lm_key = order(poly.LM)
+        for idx, (existing_sig, existing_poly) in enumerate(JP):
+            if existing_sig == signature:
+                if order(existing_poly.LM) > poly_lm_key:
+                    JP[idx] = (signature, poly)
+                return
+        JP.append((signature, poly))
+
+    while JP:
+        min_idx = select_min_signature()
+        signature, poly = JP.pop(min_idx)
+
+        if any(signature_divides(blocker, signature) for blocker in H):
+            continue
+
+        poly = poly.copy()
+        poly = regular_top_reduce(signature, poly)
+
+        if poly == 0:
+            H.add(signature)
+            JP = remove_multiples(JP, [signature])
+            continue
+
+        if is_super_top_reducible(signature, poly):
+            continue
+
+        poly = poly.monic()
+
+        new_syzygies: list[tuple[tuple[int, ...], int]] = []
+        for sig_existing, existing_poly in zip(U, V):
+            sig_from_existing = signature_mul(sig_existing, poly.LM)
+            sig_from_new = signature_mul(signature, existing_poly.LM)
+            leading_sig = sig_from_existing if signature_lt(sig_from_new, sig_from_existing) else sig_from_new
+            if leading_sig not in H:
+                new_syzygies.append(leading_sig)
+
+        if new_syzygies:
+            H.update(new_syzygies)
+            JP = remove_multiples(JP, new_syzygies)
+
+        current_U = list(U)
+        current_V = list(V)
+        for sig_existing, existing_poly in zip(current_U, current_V):
+            lcm_mon = lcm(poly.LM, existing_poly.LM)
+            mult_new = div(lcm_mon, poly.LM)
+            mult_existing = div(lcm_mon, existing_poly.LM)
+            if mult_new is None or mult_existing is None:
+                continue
+
+            sig_new_side = signature_mul(signature, mult_new)
+            sig_existing_side = signature_mul(sig_existing, mult_existing)
+
+            if signature_lt(sig_new_side, sig_existing_side):
+                candidate_sig = sig_existing_side
+                candidate_poly = existing_poly.mul_term((mult_existing, 1))
+            else:
+                candidate_sig = sig_new_side
+                candidate_poly = poly.mul_term((mult_new, 1))
+
+            add_j_pair(candidate_sig, candidate_poly)
+
+        U.append(signature)
+        V.append(poly)
+
+    basis = interreduce(minimalize(V)) if V else []
+    syzygies = sorted(H, key=signature_key)
+
+    return basis, syzygies
+
+
+def M4GB_buchberger(G: list[PolyElement]) -> list[PolyElement]:
+    '''
+    Compute the Groebner basis of the ideal generated by G using the M4GB Buchberger's algorithm.
+
+    Args:
+    - G: List of polynomial generators.
+
+    Returns:
+    - A minimal, interreduced Groebner basis of the ideal generated by G.
+    '''
+
+    raise NotImplementedError("M4GB Buchberger's algorithm is not yet implemented.")
+
 class BuchbergerEnv(gym.Env):
     generators: list[PolyElement]
     pairs: list[tuple[int, int]]

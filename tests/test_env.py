@@ -1,7 +1,10 @@
 from typing import Any, cast
+import itertools
 
 import numpy as np
 import sympy as sp
+from sympy.polys.rings import PolyElement
+import pytest
 
 from grobnerRl.envs.env import (
     tokenize,
@@ -13,6 +16,7 @@ from grobnerRl.envs.env import (
     interreduce,
     select,
     buchberger,
+    GVW_buchberger,
     BuchbergerEnv,
 )
 from grobnerRl.envs.ideals import IdealGenerator
@@ -133,6 +137,66 @@ def test_interreduce_returns_monic_remainders():
     assert reduced == [x, y]
 
 
+def assert_reduced_groebner_basis(basis: list[PolyElement]):
+    if not basis:
+        return
+    assert all(poly.LC == 1 for poly in basis)
+    ring = basis[0].ring
+    ordered = sorted([poly.copy() for poly in basis], key=lambda f: ring.order(f.LM))
+    reduced = interreduce([poly.copy() for poly in ordered])
+    assert len(ordered) == len(reduced)
+    for original, reduced_poly in zip(ordered, reduced):
+        assert original == reduced_poly
+
+    for poly1, poly2 in itertools.combinations(basis, 2):
+        s = spoly(poly1, poly2)
+        remainder, _ = poly_reduce(s, basis)
+        assert remainder == 0
+
+
+def katsura_system(n: int):
+    var_names = ','.join(f'x{i}' for i in range(n + 1))
+    R, *vars_ = sp.ring(var_names, sp.QQ, 'lex')
+    polynomials = []
+    total = sum(vars_[1:-1], R.zero) if n > 1 else R.zero
+    polynomials.append(vars_[0] + 2 * total + vars_[-1] - 1)
+    for k in range(1, n):
+        acc = R.zero
+        for i in range(0, n + 1 - k):
+            acc += vars_[i] * vars_[i + k]
+        polynomials.append(acc - vars_[k])
+    polynomials.append(sum((var**2 for var in vars_), R.zero) - vars_[0])
+    return R, vars_, polynomials
+
+
+def katsura_expected_basis(R, vars_, n: int):
+    if n == 1:
+        return [
+            vars_[1]**2 - sp.Rational(1, 2) * vars_[1],
+            vars_[0] + vars_[1] - 1,
+        ]
+    if n == 2:
+        return [
+            vars_[2]**3 - sp.Rational(1, 2) * vars_[2]**2,
+            vars_[1] * vars_[2] - sp.Rational(1, 2) * vars_[1] + sp.Rational(1, 2) * vars_[2]**2 - sp.Rational(1, 4) * vars_[2],
+            vars_[1]**2,
+            vars_[0] + 2 * vars_[1] + vars_[2] - 1,
+        ]
+    if n == 3:
+        return [
+            vars_[3]**5 - sp.Rational(25, 18) * vars_[3]**4 + sp.Rational(4, 9) * vars_[3]**3,
+            vars_[2] * vars_[3]**3 - sp.Rational(25, 18) * vars_[2] * vars_[3]**2 + sp.Rational(4, 9) * vars_[2] * vars_[3]
+            + sp.Rational(1, 2) * vars_[3]**4 - sp.Rational(25, 36) * vars_[3]**3 + sp.Rational(2, 9) * vars_[3]**2,
+            vars_[2]**2 + sp.Rational(45, 8) * vars_[3]**4 - sp.Rational(53, 16) * vars_[3]**3 + sp.Rational(1, 4) * vars_[3]**2,
+            vars_[1] + sp.Rational(153, 16) * vars_[2] * vars_[3]**2 - sp.Rational(281, 32) * vars_[2] * vars_[3] + vars_[2]
+            - sp.Rational(243, 64) * vars_[3]**4 + sp.Rational(1143, 128) * vars_[3]**3 - sp.Rational(289, 64) * vars_[3]**2
+            + sp.Rational(1, 2) * vars_[3],
+            vars_[0] - sp.Rational(153, 8) * vars_[2] * vars_[3]**2 + sp.Rational(281, 16) * vars_[2] * vars_[3]
+            + sp.Rational(243, 32) * vars_[3]**4 - sp.Rational(1143, 64) * vars_[3]**3 + sp.Rational(289, 32) * vars_[3]**2 - 1,
+        ]
+    raise ValueError('Unsupported Katsura instance size')
+
+
 def test_select_supports_various_strategies():
     basis = [x**2 + 1, x * y + 1, y**2 + 1]
     pairs = [(0, 1), (0, 2), (1, 2)]
@@ -158,6 +222,7 @@ def test_select_degree_after_reduce_handles_zero_remainder_pair():
 def test_buchberger_returns_expected_basis_and_stats():
     basis, stats = buchberger([x * y - 1, x - 1])
     assert {g for g in basis} == {x - 1, y - 1}
+    assert_reduced_groebner_basis(basis)
     assert stats == {
         "zero_reductions": 0,
         "nonzero_reductions": 1,
@@ -169,6 +234,7 @@ def test_buchberger_returns_expected_basis_and_stats():
 def test_buchberger_nontrivial_ideal_produces_expected_basis():
     basis, stats = buchberger([x**2 - y, x * y - 1])
     assert {g for g in basis} == {x - y**2, y**3 - 1}
+    assert_reduced_groebner_basis(basis)
     assert stats["pairs_processed"] == 3
     assert stats["nonzero_reductions"] == 2
 
@@ -176,6 +242,7 @@ def test_buchberger_nontrivial_ideal_produces_expected_basis():
 def test_buchberger_handles_empty_input():
     basis, stats = buchberger([])
     assert basis == []
+    assert_reduced_groebner_basis(basis)
     assert stats == {
         "zero_reductions": 0,
         "nonzero_reductions": 0,
@@ -227,3 +294,286 @@ def test_buchberger_env_step_zero_remainder_terminates_episode():
     assert reward == -1
     assert terminated is True
     assert truncated is False
+
+def test_gvw_buchberger_simple_ideal():
+    basis, syzygies = GVW_buchberger([x * y - 1, x - 1])
+    assert {g for g in basis} == {x - 1, y - 1}
+    assert_reduced_groebner_basis(basis)
+    assert isinstance(syzygies, list)
+
+
+def test_gvw_buchberger_nontrivial_ideal():
+    basis, syzygies = GVW_buchberger([x**2 - y, x * y - 1])
+    assert {g for g in basis} == {x - y**2, y**3 - 1}
+    assert_reduced_groebner_basis(basis)
+    assert isinstance(syzygies, list)
+
+
+def test_gvw_buchberger_empty_input():
+    basis, syzygies = GVW_buchberger([])
+    assert basis == []
+    assert syzygies == []
+    assert_reduced_groebner_basis(basis)
+
+
+def test_gvw_buchberger_single_generator():
+    basis, syzygies = GVW_buchberger([x + y])
+    assert basis == [x + y]
+    assert_reduced_groebner_basis(basis)
+    assert isinstance(syzygies, list)
+
+
+def test_gvw_buchberger_already_groebner():
+    basis, syzygies = GVW_buchberger([x, y])
+    assert {g for g in basis} == {x, y}
+    assert_reduced_groebner_basis(basis)
+    assert isinstance(syzygies, list)
+
+
+def test_gvw_buchberger_with_zero_polynomials():
+    basis, syzygies = GVW_buchberger([x + y, R.zero, x * y])
+    assert R.zero not in basis
+    assert len(basis) > 0
+    assert_reduced_groebner_basis(basis)
+
+
+def test_gvw_buchberger_three_generators():
+    basis, syzygies = GVW_buchberger([x**2 + y**2 - 1, x - y, x * y])
+    assert len(basis) > 0
+    assert all(g != 0 for g in basis)
+    assert_reduced_groebner_basis(basis)
+
+
+def test_gvw_buchberger_produces_minimal_basis():
+    basis, _ = GVW_buchberger([x**2, x * y, y**2])
+    minimal = minimalize(basis)
+    assert len(basis) == len(minimal)
+    assert_reduced_groebner_basis(basis)
+
+
+def test_gvw_buchberger_produces_interreduced_basis():
+    basis, _ = GVW_buchberger([x**2 + x, x + 1])
+    for i, poly in enumerate(basis):
+        remainder, _ = poly_reduce(poly, basis[:i] + basis[i+1:])
+        assert remainder == poly or len(basis) == 1
+    assert_reduced_groebner_basis(basis)
+
+
+def test_gvw_buchberger_cyclic_ideal():
+    basis, syzygies = GVW_buchberger([x + y, x * y - 1])
+    assert len(basis) == 2
+    assert all(g.monic() == g for g in basis)
+    assert_reduced_groebner_basis(basis)
+
+
+def test_gvw_buchberger_homogeneous_ideal():
+    basis, syzygies = GVW_buchberger([x**2 - y**2, x * y])
+    assert len(basis) > 0
+    assert isinstance(syzygies, list)
+    assert_reduced_groebner_basis(basis)
+
+
+def test_gvw_buchberger_returns_monic_basis():
+    basis, _ = GVW_buchberger([2*x + 3*y, 5*x*y - 7])
+    assert all(g.LC == 1 for g in basis)
+    assert_reduced_groebner_basis(basis)
+
+
+@pytest.mark.parametrize("n", [1, 2, 3])
+def test_katsura_systems(n):
+    R, vars_, polynomials = katsura_system(n)
+    expected_basis = katsura_expected_basis(R, vars_, n)
+
+    buchberger_basis, _ = buchberger(polynomials)
+    gvw_basis, _ = GVW_buchberger(polynomials)
+
+    assert {g for g in buchberger_basis} == {g for g in expected_basis}
+    assert {g for g in gvw_basis} == {g for g in expected_basis}
+
+    assert_reduced_groebner_basis(buchberger_basis)
+    assert_reduced_groebner_basis(gvw_basis)
+
+
+# Tests adapted from test_buchberger.py
+
+R1, x1, y1, z1 = sp.ring('x,y,z', sp.FF(32003), 'grevlex')
+R2, a, b, c, d = sp.ring('a,b,c,d', sp.QQ, 'lex')
+R3, t, u, v = sp.ring('t,u,v', sp.FF(101), 'grlex')
+
+
+@pytest.mark.parametrize("f, g, s", [
+    (x1**2 + x1*y1, y1**2 + x1*y1, 0),
+    (x1**3*y1**2 - x1**2*y1**3, x1**4*y1 + y1**2, -x1**3*y1**3 - y1**3),
+    (x1**2 + y1**3, x1*y1**2 + x1 + 1, x1**3 - x1*y1 - y1),
+    (a**2 + a*b, b**2 + a*b, 0),
+    (a**3*b**2 - a**2*b**3, a**4*b + b**2, -a**3*b**3 - b**3),
+    (a**2 - b**3, a*b**2 + a + 1, -b**5 - a**2 - a),
+    (t**2 + t*u, u**2 + t*u, 0),
+    (t**3*u**2 - t**2*u**3, t**4*u + u**2, -t**3*u**3 - u**3),
+    (t**2 + u**3, t*u**2 + t + 1, t**3 - t*u - u),
+])
+def test_spoly_from_buchberger(f, g, s):
+    assert spoly(f, g) == s
+
+
+@pytest.mark.parametrize("g, F, r, s", [
+    (x1**5*y1**10*z1**4 + 22982*x1**3*y1*z1**2,
+     [x1**5*y1**12 + 25797*x1*y1**5*z1**2, x1*y1**3*z1 + 27630*x1**2*y1, x1**2*y1**9*z1 + 8749*x1**2],
+     2065*x1**9*y1**2 + 22982*x1**3*y1*z1**2,
+     4),
+    (a**5*c + a**3*b + a**2*b**2 + a*b**2 + a,
+     [a**2*c - a, a*b**2 + c**5, a*c + c**3/4],
+     a**4 + a**3*b + a + c**7/4 - c**5,
+     4),
+    (a**3*b*c**2 + a**2*c,
+     [a**2 + b, a*b*c + c, a*c**2 + b**2],
+     b*c**2 - b*c,
+     3),
+])
+def test_reduce_from_buchberger(g, F, r, s):
+    assert poly_reduce(g, F) == (r, {'steps': s})
+
+
+@pytest.mark.parametrize("s, p", [
+    ('degree', (0, 1)), ('normal', (0, 1)), ('first', (0, 1)),
+])
+def test_select_buchberger_0(s, p):
+    G = [x1**2 + y1, x1*y1 + x1, z1**3 + x1 + y1]
+    P = [(0, 1), (0, 2), (1, 2)]
+    assert select(G, P, strategy=s) == p
+
+
+@pytest.mark.parametrize("s, p", [
+    (['degree', 'first'], (0, 2)), ('normal', (1, 2)), ('first', (0, 1)),
+])
+def test_select_buchberger_1(s, p):
+    G = [x1*y1 + 1, z1**2 + x1 + z1, y1*z1 + x1]
+    P = [(0, 1), (0, 2), (1, 2)]
+    assert select(G, P, strategy=s) == p
+
+
+@pytest.mark.parametrize("s, p", [
+    ('normal', (0, 2)), ('first', (0, 2)), ('random', (0, 2)),
+])
+def test_select_buchberger_2(s, p):
+    G = [x1*y1 + 1, z1**2 + x1 + z1, y1*z1 + x1]
+    P = [(0, 2)]
+    assert select(G, P, strategy=s) == p
+
+
+@pytest.mark.parametrize("s, p", [
+    (['degree', 'first'], (0, 1)),
+    (['degree', 'normal'], (1, 3)),
+    ('normal', (1, 2)),
+])
+def test_select_buchberger_3(s, p):
+    G = [a*b + c*d**3, c*d + d, d**5, c**2*d**2]
+    P = [(0, 1), (1, 2), (1, 3)]
+    assert select(G, P, strategy=s) == p
+
+
+@pytest.mark.parametrize("s, p", [
+    ('first', (0, 2)), ('normal', (1, 2)),
+    (['degree', 'first'], (1, 3)),
+    (['degree', 'normal'], (1, 4)),
+])
+def test_select_buchberger_4(s, p):
+    G = [a*b*c, c*d, d**5, a*b, c**2*d**2]
+    P = [(0, 2), (1, 2), (1, 3), (1, 4)]
+    assert select(G, P, strategy=s) == p
+
+
+@pytest.mark.parametrize("s, p", [
+    ('first', (1, 2)),
+    (['first', 'random'], (1, 2)),
+    ('normal', (0, 3)),
+    (['degree', 'first'], (0, 3)),
+    (['degree', 'normal', 'first'], (0, 3)),
+])
+def test_select_buchberger_5(s, p):
+    G = [t*u**2 + t**2, u*v + 1, v**5 + t, u**3 + t*u]
+    P = [(0, 3), (1, 2)]
+    assert select(G, P, strategy=s) == p
+
+
+def test_update_from_buchberger_0():
+    # Test with x1 from R1
+    G = []
+    P = []
+    update(G, P, x1**2 + x1*y1 + 2)
+    assert G == [x1**2 + x1*y1 + 2]
+    assert P == []
+
+
+def test_update_from_buchberger_1():
+    G = [x1*y1**2 + 2*x1*z1 - x1]
+    P = []
+    f = z1**5 + 2*x1**2*y1*z1 + x1*z1
+    update(G, P, f)
+    assert G == [x1*y1**2 + 2*x1*z1 - x1, f]
+    assert P == []
+
+
+def test_update_from_buchberger_2():
+    G = [a*b**2 + 2*c, a*c**2 - b**2 - c]
+    P = [(0, 1)]
+    f = a + b**2*c + 4*c**2 + 1
+    update(G, P, f)
+    assert len(G) == 3 and G[2] == f
+    # The update function in env.py uses Gebauer-Moeller criteria by default
+    assert (0, 2) in P and (1, 2) in P
+
+
+def test_update_from_buchberger_3():
+    G = [a*b**2 + 2*c, a*c**2 - b**2 - c]
+    P = [(0, 1)]
+    f = 4*c**2 + 1
+    update(G, P, f)
+    assert len(G) == 3 and G[2] == f
+    assert (0, 2) in P or (1, 2) in P
+
+
+def test_update_from_buchberger_4():
+    G = [a*b**2 + 2*c, a*c**2 - b**2 - c]
+    P = [(0, 1)]
+    f = 4*b**2*c + b*c**2
+    update(G, P, f)
+    assert len(G) == 3 and G[2] == f
+    # Check that at least some pairs were added
+    assert len(P) > 0
+
+
+@pytest.mark.parametrize("G, Gmin", [
+    ([], []),
+    ([x1*y1**2 + z1, x1*z1 + 3*y1, x1**2 + y1*z1, -3*y1**3 + z1**2, -3*y1 - z1**3/3, z1**8/243 + z1],
+     [x1*z1 + 3*y1, x1**2 + y1*z1, -z1**3/3 - 3*y1, -3*y1**3 + z1**2, x1*y1**2 + z1]),
+    ([a*b**2 + c, a*c + 3*b, a**2 + b*c, -3*b**3 + c**2, -3*b - c**3/3, c**8/243 + c],
+     [c**8/243 + c, -3*b - c**3/3, a*c + 3*b, a**2 + b*c]),
+])
+def test_minimalize_from_buchberger(G, Gmin):
+    assert minimalize(G) == Gmin
+
+
+@pytest.mark.parametrize("G, Gred", [
+    ([], []),
+    ([x1*z1 + 3*y1, x1**2 + y1*z1, -z1**3/3 - 3*y1, -3*y1**3 + z1**2, x1*y1**2 + z1],
+     [x1*z1 + 3*y1, x1**2 + y1*z1, z1**3 + 9*y1, y1**3 - z1**2/3, x1*y1**2 + z1]),
+    ([c**8/243 + c, -3*b - c**3/3, a*c + 3*b, a**2 + b*c],
+     [c**8 + 243*c, b + c**3/9, a*c - c**3/3, a**2 - c**4/9]),
+])
+def test_interreduce_from_buchberger(G, Gred):
+    assert interreduce(G) == Gred
+
+
+@pytest.mark.parametrize("F, G", [
+    ([], []),
+    ([y1 - x1**2, z1 - x1**3], [y1**2 - x1*z1, x1*y1 - z1, x1**2 - y1]),
+    ([b - a**2, c - a**3], [b**3 - c**2, a*c - b**2, a*b - c, a**2 - b]),
+    ([u - t**2, v - t**3], [t*v - u**2, t*u - v, t**2 - u, u**3 - v**2]),
+    ([x1 + y1 + z1, x1*y1 + y1*z1 + x1*z1, x1*y1*z1 - 1], [x1 + y1 + z1, y1**2 + y1*z1 + z1**2, z1**3 - 1]),
+])
+def test_buchberger_from_buchberger(F, G):
+    result, _ = GVW_buchberger(F)
+    assert result == G
+    result2, _ = buchberger(F)
+    assert result2 == G
