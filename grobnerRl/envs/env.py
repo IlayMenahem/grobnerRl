@@ -5,6 +5,7 @@ implementation of deep buchberger environment with gaubmoller criteria, f4, and 
 from collections import defaultdict
 from copy import deepcopy
 from collections.abc import Sequence
+from typing import Any, Callable
 
 import gymnasium as gym
 from sympy.polys.rings import PolyElement
@@ -211,6 +212,278 @@ def interreduce(G):
     return [G[i].rem(G[:i] + G[i+1:]).monic() for i in range(len(G))]
 
 
+# GVW Signature-based Algorithm Helper Functions
+
+def _signature_mul(signature: tuple[tuple[int, ...], int], mon: tuple[int, ...], mul_fn: Callable) -> tuple[tuple[int, ...], int]:
+    '''Multiply a signature by a monomial.'''
+    return (mul_fn(signature[0], mon), signature[1])
+
+
+def _signature_key(signature: tuple[tuple[int, ...], int], initial_lms: list[tuple[int, ...]], mul_fn: Callable, order_fn: Callable) -> tuple:
+    '''Compute the ordering key for a signature.'''
+    mon, idx = signature
+    lead = mul_fn(mon, initial_lms[idx])
+    return (order_fn(lead), idx, order_fn(mon))
+
+
+def _signature_lt(left: tuple[tuple[int, ...], int], right: tuple[tuple[int, ...], int], initial_lms: list[tuple[int, ...]], mul_fn: Callable, order_fn: Callable) -> bool:
+    '''Check if left signature is less than right signature.'''
+    return _signature_key(left, initial_lms, mul_fn, order_fn) < _signature_key(right, initial_lms, mul_fn, order_fn)
+
+
+def _signature_divides(base: tuple[tuple[int, ...], int], target: tuple[tuple[int, ...], int], div_fn: Callable) -> bool:
+    '''Check if base signature divides target signature.'''
+    if base[1] != target[1]:
+        return False
+    return div_fn(target[0], base[0]) is not None
+
+
+def _is_blocked(signature: tuple[tuple[int, ...], int], syzygies: set[tuple[tuple[int, ...], int]], div_fn: Callable) -> bool:
+    '''Check if a signature is blocked by any syzygy.'''
+    return any(_signature_divides(blocker, signature, div_fn) for blocker in syzygies)
+
+
+def _regular_top_reduce(
+    signature: tuple[tuple[int, ...], int],
+    poly: PolyElement,
+    signatures: list[tuple[tuple[int, ...], int]],
+    generators: list[PolyElement],
+    initial_lms: list[tuple[int, ...]],
+    div_fn: Callable,
+    mul_fn: Callable,
+    order_fn: Callable
+) -> PolyElement:
+    '''Perform regular top reduction on a polynomial.'''
+    if not signatures:
+        return poly
+
+    while poly != 0:
+        lm_poly, lc_poly = poly.LT
+        reduced = False
+        for sig_reducer, reducer in zip(signatures, generators):
+            mult = div_fn(lm_poly, reducer.LM)
+            if mult is None:
+                continue
+            sig_mult = _signature_mul(sig_reducer, mult, mul_fn)
+            if _signature_lt(sig_mult, signature, initial_lms, mul_fn, order_fn):
+                ratio = lc_poly / reducer.LC
+                poly = poly - reducer.mul_term((mult, ratio))
+                reduced = True
+                break
+        if not reduced:
+            break
+
+    return poly
+
+
+def _is_super_top_reducible(
+    signature: tuple[tuple[int, ...], int],
+    poly: PolyElement,
+    signatures: list[tuple[tuple[int, ...], int]],
+    generators: list[PolyElement],
+    div_fn: Callable,
+    mul_fn: Callable
+) -> bool:
+    '''Check if a polynomial is super top reducible.'''
+    if not signatures or poly == 0:
+        return False
+
+    lm_poly = poly.LM
+    for sig_reducer, reducer in zip(signatures, generators):
+        mult = div_fn(lm_poly, reducer.LM)
+        if mult is None:
+            continue
+        if _signature_mul(sig_reducer, mult, mul_fn) == signature:
+            return True
+    return False
+
+
+def _remove_multiples(
+    jpairs: list[tuple[tuple[tuple[int, ...], int], PolyElement]],
+    pairs: list[tuple[tuple[int, ...], int]],
+    blockers: Sequence[tuple[tuple[int, ...], int]],
+    div_fn: Callable
+) -> tuple[list[tuple[tuple[tuple[int, ...], int], PolyElement]], list[tuple[tuple[int, ...], int]]]:
+    '''Remove pairs that are multiples of blockers.'''
+    if not blockers:
+        return jpairs, pairs
+
+    filtered_jpairs: list[tuple[tuple[tuple[int, ...], int], PolyElement]] = []
+    filtered_pairs: list[tuple[tuple[int, ...], int]] = []
+
+    for sig, poly in jpairs:
+        if any(_signature_divides(blocker, sig, div_fn) for blocker in blockers):
+            continue
+        filtered_jpairs.append((sig, poly))
+        filtered_pairs.append(sig)
+
+    return filtered_jpairs, filtered_pairs
+
+
+def _add_j_pair(
+    jpairs: list[tuple[tuple[tuple[int, ...], int], PolyElement]],
+    pairs: list[tuple[tuple[int, ...], int]],
+    signature: tuple[tuple[int, ...], int],
+    poly: PolyElement,
+    syzygies: set[tuple[tuple[int, ...], int]],
+    div_fn: Callable,
+    order_fn: Callable
+) -> tuple[list[tuple[tuple[tuple[int, ...], int], PolyElement]], list[tuple[tuple[int, ...], int]]]:
+    '''Add a new j-pair, replacing existing one if signature matches and new poly has smaller LM.'''
+    if _is_blocked(signature, syzygies, div_fn):
+        return jpairs, pairs
+
+    poly_lm_key = order_fn(poly.LM)
+    for idx, (existing_sig, existing_poly) in enumerate(jpairs):
+        if existing_sig == signature:
+            if order_fn(existing_poly.LM) > poly_lm_key:
+                jpairs[idx] = (signature, poly)
+                pairs[idx] = signature
+            return jpairs, pairs
+
+    jpairs.append((signature, poly))
+    pairs.append(signature)
+    return jpairs, pairs
+
+
+def _initialize_gvw_state(inputs: Sequence[PolyElement]) -> dict[str, Any]:
+    '''Initialize the GVW algorithm state from input polynomials.'''
+    state = {
+        'generators': [],
+        'pairs': [],
+        'syzygies': set(),
+        'jpairs': [],
+        'signatures': [],
+        'initial_lms': [],
+        'ring': None,
+        'mul': None,
+        'div': None,
+        'lcm': None,
+        'order': None,
+        'zero_monom': ()
+    }
+
+    monic_inputs = [poly.monic() for poly in inputs if poly != 0]
+    if not monic_inputs:
+        return state
+
+    ring = monic_inputs[0].ring
+    state['ring'] = ring
+    state['mul'] = ring.monomial_mul
+    state['div'] = ring.monomial_div
+    state['lcm'] = ring.monomial_lcm
+    state['order'] = ring.order
+    state['zero_monom'] = (0,) * ring.ngens
+    state['initial_lms'] = [poly.LM for poly in monic_inputs]
+
+    state['jpairs'] = [((state['zero_monom'], idx), poly) for idx, poly in enumerate(monic_inputs)]
+    state['pairs'] = [signature for signature, _ in state['jpairs']]
+
+    return state
+
+
+def _select_min_signature_index(state: dict[str, Any]) -> int:
+    '''Select the index of the pair with minimal signature.'''
+    if not state['jpairs']:
+        raise ValueError('no pairs to select')
+    return min(
+        (_signature_key(sig, state['initial_lms'], state['mul'], state['order']), idx)
+        for idx, (sig, _) in enumerate(state['jpairs'])
+    )[1]
+
+
+def _process_pair(state: dict[str, Any], index: int) -> dict[str, Any]:
+    '''Process a signature pair at the given index.'''
+    if index < 0 or index >= len(state['jpairs']):
+        raise IndexError('pair index out of range')
+
+    lcm_fn = state['lcm']
+    div_fn = state['div']
+    mul_fn = state['mul']
+    order_fn = state['order']
+
+    signature, poly = state['jpairs'].pop(index)
+    state['pairs'].pop(index)
+
+    result: dict[str, Any] = {
+        'signature': signature,
+        'poly_added': False,
+        'syzygy_added': False,
+    }
+
+    if _is_blocked(signature, state['syzygies'], div_fn):
+        return result
+
+    working_poly = poly.copy()
+    working_poly = _regular_top_reduce(
+        signature, working_poly, state['signatures'], state['generators'],
+        state['initial_lms'], div_fn, mul_fn, order_fn
+    )
+
+    if working_poly == 0:
+        state['syzygies'].add(signature)
+        state['jpairs'], state['pairs'] = _remove_multiples(
+            state['jpairs'], state['pairs'], [signature], div_fn
+        )
+        result['syzygy_added'] = True
+        return result
+
+    if _is_super_top_reducible(
+        signature, working_poly, state['signatures'], state['generators'], div_fn, mul_fn
+    ):
+        return result
+
+    working_poly = working_poly.monic()
+
+    new_syzygies: list[tuple[tuple[int, ...], int]] = []
+    for sig_existing, existing_poly in zip(state['signatures'], state['generators']):
+        sig_from_existing = _signature_mul(sig_existing, working_poly.LM, mul_fn)
+        sig_from_new = _signature_mul(signature, existing_poly.LM, mul_fn)
+        leading_sig = (
+            sig_from_existing
+            if _signature_lt(sig_from_new, sig_from_existing, state['initial_lms'], mul_fn, order_fn)
+            else sig_from_new
+        )
+        if leading_sig not in state['syzygies']:
+            new_syzygies.append(leading_sig)
+
+    if new_syzygies:
+        state['syzygies'].update(new_syzygies)
+        state['jpairs'], state['pairs'] = _remove_multiples(
+            state['jpairs'], state['pairs'], new_syzygies, div_fn
+        )
+
+    current_signatures = list(state['signatures'])
+    current_generators = list(state['generators'])
+    for sig_existing, existing_poly in zip(current_signatures, current_generators):
+        lcm_mon = lcm_fn(working_poly.LM, existing_poly.LM)
+        mult_new = div_fn(lcm_mon, working_poly.LM)
+        mult_existing = div_fn(lcm_mon, existing_poly.LM)
+        if mult_new is None or mult_existing is None:
+            continue
+
+        sig_new_side = _signature_mul(signature, mult_new, mul_fn)
+        sig_existing_side = _signature_mul(sig_existing, mult_existing, mul_fn)
+
+        if _signature_lt(sig_new_side, sig_existing_side, state['initial_lms'], mul_fn, order_fn):
+            candidate_sig = sig_existing_side
+            candidate_poly = existing_poly.mul_term((mult_existing, 1))
+        else:
+            candidate_sig = sig_new_side
+            candidate_poly = working_poly.mul_term((mult_new, 1))
+
+        state['jpairs'], state['pairs'] = _add_j_pair(
+            state['jpairs'], state['pairs'], candidate_sig, candidate_poly,
+            state['syzygies'], div_fn, order_fn
+        )
+
+    state['signatures'].append(signature)
+    state['generators'].append(working_poly)
+    result['poly_added'] = True
+
+    return result
+
+
 def select(G: list[PolyElement], P: list[tuple[int, int]], strategy='normal') -> tuple[int, int]:
     '''
     Select and return a pair from P.
@@ -327,187 +600,23 @@ def GVW_buchberger(G: list[PolyElement]) -> tuple[list[PolyElement], list[tuple[
       list of leading module terms of discovered syzygies (each encoded as (monomial, index)).
     '''
 
-    if not G:
-        return [], []
+    state = _initialize_gvw_state(G)
 
-    # Prepare the input: discard zeros, store monic copies, and cache leading monomials for ordering.
-    inputs: list[PolyElement] = []
-    for poly in G:
-        if poly != 0:
-            inputs.append(poly.monic())
+    while state['jpairs']:
+        index = _select_min_signature_index(state)
+        _process_pair(state, index)
 
-    if not inputs:
-        return [], []
-
-    ring = inputs[0].ring
-    order = ring.order
-    mul = ring.monomial_mul
-    div = ring.monomial_div
-    lcm = ring.monomial_lcm
-    ngens = ring.ngens
-    zero_monom = (0,) * ngens
-    initial_lms = [poly.LM for poly in inputs]
-
-    def signature_mul(signature: tuple[tuple[int, ...], int], mon: tuple[int, ...]) -> tuple[tuple[int, ...], int]:
-        return (mul(signature[0], mon), signature[1])
-
-    def signature_key(signature: tuple[tuple[int, ...], int]) -> tuple:
-        mon, idx = signature
-        lead = mul(mon, initial_lms[idx])
-        return (order(lead), idx, order(mon))
-
-    def signature_lt(left: tuple[tuple[int, ...], int], right: tuple[tuple[int, ...], int]) -> bool:
-        return signature_key(left) < signature_key(right)
-
-    def signature_divides(base: tuple[tuple[int, ...], int], target: tuple[tuple[int, ...], int]) -> bool:
-        if base[1] != target[1]:
-            return False
-        return div(target[0], base[0]) is not None
-
-    def remove_multiples(jpairs: list[tuple[tuple[tuple[int, ...], int], PolyElement]],
-                         signatures: list[tuple[tuple[int, ...], int]]) -> list[tuple[tuple[tuple[int, ...], int], PolyElement]]:
-        if not signatures:
-            return jpairs
-        filtered: list[tuple[tuple[tuple[int, ...], int], PolyElement]] = []
-        for sig, poly in jpairs:
-            if any(signature_divides(blocker, sig) for blocker in signatures):
-                continue
-            filtered.append((sig, poly))
-        return filtered
-
-    U: list[tuple[tuple[int, ...], int]] = []
-    V: list[PolyElement] = []
-    H: set[tuple[tuple[int, ...], int]] = set()
-    JP: list[tuple[tuple[tuple[int, ...], int], PolyElement]] = [((zero_monom, idx), poly) for idx, poly in enumerate(inputs)]
-
-    def select_min_signature() -> int:
-        min_idx = 0
-        min_key = signature_key(JP[0][0])
-        for idx in range(1, len(JP)):
-            key = signature_key(JP[idx][0])
-            if key < min_key:
-                min_idx = idx
-                min_key = key
-        return min_idx
-
-    def regular_top_reduce(signature: tuple[tuple[int, ...], int], poly: PolyElement) -> PolyElement:
-        if not U:
-            return poly
-
-        while poly != 0:
-            lm_poly, lc_poly = poly.LT
-            reduced = False
-            for sig_reducer, reducer in zip(U, V):
-                mult = div(lm_poly, reducer.LM)
-                if mult is None:
-                    continue
-                sig_mult = signature_mul(sig_reducer, mult)
-                if signature_lt(sig_mult, signature):
-                    ratio = lc_poly / reducer.LC
-                    poly = poly - reducer.mul_term((mult, ratio))
-                    reduced = True
-                    break
-            if not reduced:
-                break
-        return poly
-
-    def is_super_top_reducible(signature: tuple[tuple[int, ...], int], poly: PolyElement) -> bool:
-        if not U or poly == 0:
-            return False
-        lm_poly = poly.LM
-        for sig_reducer, reducer in zip(U, V):
-            mult = div(lm_poly, reducer.LM)
-            if mult is None:
-                continue
-            if signature_mul(sig_reducer, mult) == signature:
-                return True
-        return False
-
-    def add_j_pair(signature: tuple[tuple[int, ...], int], poly: PolyElement) -> None:
-        if any(signature_divides(blocker, signature) for blocker in H):
-            return
-        poly_lm_key = order(poly.LM)
-        for idx, (existing_sig, existing_poly) in enumerate(JP):
-            if existing_sig == signature:
-                if order(existing_poly.LM) > poly_lm_key:
-                    JP[idx] = (signature, poly)
-                return
-        JP.append((signature, poly))
-
-    while JP:
-        min_idx = select_min_signature()
-        signature, poly = JP.pop(min_idx)
-
-        if any(signature_divides(blocker, signature) for blocker in H):
-            continue
-
-        poly = poly.copy()
-        poly = regular_top_reduce(signature, poly)
-
-        if poly == 0:
-            H.add(signature)
-            JP = remove_multiples(JP, [signature])
-            continue
-
-        if is_super_top_reducible(signature, poly):
-            continue
-
-        poly = poly.monic()
-
-        new_syzygies: list[tuple[tuple[int, ...], int]] = []
-        for sig_existing, existing_poly in zip(U, V):
-            sig_from_existing = signature_mul(sig_existing, poly.LM)
-            sig_from_new = signature_mul(signature, existing_poly.LM)
-            leading_sig = sig_from_existing if signature_lt(sig_from_new, sig_from_existing) else sig_from_new
-            if leading_sig not in H:
-                new_syzygies.append(leading_sig)
-
-        if new_syzygies:
-            H.update(new_syzygies)
-            JP = remove_multiples(JP, new_syzygies)
-
-        current_U = list(U)
-        current_V = list(V)
-        for sig_existing, existing_poly in zip(current_U, current_V):
-            lcm_mon = lcm(poly.LM, existing_poly.LM)
-            mult_new = div(lcm_mon, poly.LM)
-            mult_existing = div(lcm_mon, existing_poly.LM)
-            if mult_new is None or mult_existing is None:
-                continue
-
-            sig_new_side = signature_mul(signature, mult_new)
-            sig_existing_side = signature_mul(sig_existing, mult_existing)
-
-            if signature_lt(sig_new_side, sig_existing_side):
-                candidate_sig = sig_existing_side
-                candidate_poly = existing_poly.mul_term((mult_existing, 1))
-            else:
-                candidate_sig = sig_new_side
-                candidate_poly = poly.mul_term((mult_new, 1))
-
-            add_j_pair(candidate_sig, candidate_poly)
-
-        U.append(signature)
-        V.append(poly)
-
-    basis = interreduce(minimalize(V)) if V else []
-    syzygies = sorted(H, key=signature_key)
+    basis = interreduce(minimalize(state['generators'])) if state['generators'] else []
+    
+    syzygies = []
+    if state['syzygies']:
+        syzygies = sorted(
+            state['syzygies'],
+            key=lambda sig: _signature_key(sig, state['initial_lms'], state['mul'], state['order'])
+        )
 
     return basis, syzygies
 
-
-def M4GB_buchberger(G: list[PolyElement]) -> list[PolyElement]:
-    '''
-    Compute the Groebner basis of the ideal generated by G using the M4GB Buchberger's algorithm.
-
-    Args:
-    - G: List of polynomial generators.
-
-    Returns:
-    - A minimal, interreduced Groebner basis of the ideal generated by G.
-    '''
-
-    raise NotImplementedError("M4GB Buchberger's algorithm is not yet implemented.")
 
 class BuchbergerEnv(gym.Env):
     generators: list[PolyElement]
@@ -528,7 +637,7 @@ class BuchbergerEnv(gym.Env):
         self.generators = []
         self.pairs = []
     
-    def reset(self, seed = None, options = None):
+    def reset(self, seed = None, options = None) -> tuple[tuple[list[np.ndarray], list[tuple[int, int]]], dict]:
         '''
         Reset the environment to start a new episode.
 
@@ -552,7 +661,7 @@ class BuchbergerEnv(gym.Env):
 
         return observation, {}
 
-    def step(self, action: int | tuple[int, int]):
+    def step(self, action: int | tuple[int, int]) -> tuple[tuple[list[np.ndarray], list[tuple[int, int]]], int, bool, bool, dict]:
         '''
         Take a step in the environment based on the given action.
 
@@ -588,3 +697,77 @@ class BuchbergerEnv(gym.Env):
             observation = make_obs(*observation)
         
         return observation, reward, terminated, truncated, {}
+    
+
+class GVWEnv(gym.Env):
+    '''Gymnasium environment wrapping the GVW signature-based Buchberger algorithm.'''
+
+    def __init__(self, ideal_generator: IdealGenerator, mode='eval'):
+        super().__init__()
+        self.ideal_generator = ideal_generator
+        self.mode = mode
+
+        self._state: dict[str, Any] = {}
+        self.generators: list[PolyElement] = []
+        self.pairs: list[tuple[tuple[int, ...], int]] = []
+
+    def _current_observation(self):
+        observation = (self.generators, self.pairs)
+        if self.mode == 'train':
+            observation = make_obs(*observation)
+        return observation
+
+    def _reset_internal_state(self) -> None:
+        self._state = {}
+        self.generators = []
+        self.pairs = []
+
+    def reset(self, *, seed=None, options=None):
+        self._reset_internal_state()
+
+        if seed is not None and hasattr(self.ideal_generator, 'seed'):
+            self.ideal_generator.seed(seed)
+
+        generators = next(self.ideal_generator)
+        self._state = _initialize_gvw_state(generators)
+        self.generators = self._state['generators']
+        self.pairs = self._state['pairs']
+
+        return self._current_observation(), {}
+
+    def _resolve_action(self, action: int | tuple[int, int] | tuple[tuple[int, ...], int]) -> int:
+        if isinstance(action, int):
+            index = action
+        elif (
+            isinstance(action, tuple)
+            and len(action) == 2
+            and isinstance(action[0], Sequence)
+            and not isinstance(action[0], (int, np.integer))
+        ):
+            signature = (tuple(action[0]), action[1])
+            if signature not in self.pairs:
+                raise ValueError('signature not found in current pair list')
+            index = self.pairs.index(signature)
+        else:
+            raise TypeError('action must be an index or signature tuple')
+
+        if index < 0 or index >= len(self.pairs):
+            raise IndexError('action index out of range')
+
+        return index
+
+    def step(self, action: int | tuple[int, int] | tuple[tuple[int, ...], int]):
+        if not self._state.get('jpairs'):
+            raise ValueError('no pairs available to process')
+
+        index = self._resolve_action(action)
+        _process_pair(self._state, index)
+
+        # Update instance variables to reflect state changes
+        self.generators = self._state['generators']
+        self.pairs = self._state['pairs']
+
+        reward = -1
+        terminated = not bool(self._state.get('jpairs'))
+
+        return self._current_observation(), reward, terminated, False, {}

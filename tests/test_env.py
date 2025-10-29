@@ -18,6 +18,7 @@ from grobnerRl.envs.env import (
     buchberger,
     GVW_buchberger,
     BuchbergerEnv,
+    GVWEnv,
 )
 from grobnerRl.envs.ideals import IdealGenerator
 
@@ -577,3 +578,468 @@ def test_buchberger_from_buchberger(F, G):
     assert result == G
     result2, _ = buchberger(F)
     assert result2 == G
+
+
+# ===========================
+# GVWEnv Tests (Challenging)
+# ===========================
+
+
+def test_gvw_env_reset_eval_mode_initializes_signatures():
+    """Test that GVWEnv properly initializes with signature pairs."""
+    env = GVWEnv(DummyIdealGenerator([[x**2 + y, x * y + 1]]), mode="eval")
+    (generators, pairs), info = env.reset()
+    
+    # Should have initialized with signature pairs
+    assert len(pairs) == 2
+    assert len(generators) == 0  # No generators yet until pairs are processed
+    assert info == {}
+    
+    # Each pair should be a signature tuple: ((monomial_tuple, int))
+    for pair in pairs:
+        assert isinstance(pair, tuple)
+        assert len(pair) == 2
+        assert isinstance(pair[0], tuple)  # monomial
+        assert isinstance(pair[1], int)    # index
+
+
+def test_gvw_env_reset_train_mode_tokenizes_state():
+    """Test that GVWEnv tokenizes observation in train mode."""
+    env = GVWEnv(DummyIdealGenerator([[x + y]]), mode="train")
+    (tokenized_generators, pairs), info = env.reset()
+    
+    assert isinstance(tokenized_generators, list)
+    assert isinstance(pairs, list)
+    assert info == {}
+
+
+def test_gvw_env_step_with_integer_action_processes_pair():
+    """Test stepping with integer action index."""
+    env = GVWEnv(DummyIdealGenerator([[x**2 + y, x * y + 1]]), mode="eval")
+    env.reset()
+    
+    initial_pair_count = len(env.pairs)
+    assert initial_pair_count > 0
+    
+    # Step with first pair
+    (generators, pairs), reward, terminated, truncated, info = env.step(0)
+    
+    assert reward == -1
+    assert truncated is False
+    assert isinstance(generators, list)
+    assert isinstance(pairs, list)
+
+
+def test_gvw_env_step_with_signature_action_processes_correct_pair():
+    """Test stepping with explicit signature tuple."""
+    env = GVWEnv(DummyIdealGenerator([[x**2 - y, x * y - 1]]), mode="eval")
+    env.reset()
+    
+    # Get the first signature pair
+    signature = env.pairs[0]
+    
+    # Step using the signature
+    (generators, pairs), reward, terminated, truncated, info = env.step(signature)
+    
+    assert reward == -1
+    assert not truncated
+    # The signature we used should no longer be in pairs (it was processed)
+    assert signature not in pairs
+
+
+def test_gvw_env_step_with_invalid_signature_raises_error():
+    """Test that invalid signature raises ValueError."""
+    env = GVWEnv(DummyIdealGenerator([[x + y]]), mode="eval")
+    env.reset()
+    
+    # Create a fake signature that doesn't exist
+    fake_signature = ((999, 999), 999)
+    
+    with pytest.raises(ValueError, match="signature not found"):
+        env.step(fake_signature)
+
+
+def test_gvw_env_step_with_invalid_action_type_raises_error():
+    """Test that invalid action type raises TypeError."""
+    env = GVWEnv(DummyIdealGenerator([[x + y]]), mode="eval")
+    env.reset()
+    
+    # Try with a plain tuple of ints (should raise TypeError)
+    with pytest.raises(TypeError, match="action must be an index or signature tuple"):
+        env.step((0, 1))
+
+
+def test_gvw_env_step_with_out_of_bounds_index_raises_error():
+    """Test that out-of-bounds index raises IndexError."""
+    env = GVWEnv(DummyIdealGenerator([[x + y]]), mode="eval")
+    env.reset()
+    
+    with pytest.raises(IndexError, match="action index out of range"):
+        env.step(999)
+    
+    with pytest.raises(IndexError, match="action index out of range"):
+        env.step(-1)
+
+
+def test_gvw_env_step_when_no_pairs_raises_error():
+    """Test that stepping when no pairs available raises ValueError."""
+    env = GVWEnv(DummyIdealGenerator([[x]]), mode="eval")
+    env.reset()
+    
+    # Process all pairs until termination
+    while env.pairs:
+        env.step(0)
+    
+    # Now try to step again
+    with pytest.raises(ValueError, match="no pairs available to process"):
+        env.step(0)
+
+
+def test_gvw_env_terminates_when_all_pairs_processed():
+    """Test that environment terminates correctly."""
+    env = GVWEnv(DummyIdealGenerator([[x * y - 1, x - 1]]), mode="eval")
+    env.reset()
+    
+    terminated = False
+    step_count = 0
+    max_steps = 100  # Safety limit
+    final_pairs = []
+    
+    while not terminated and step_count < max_steps:
+        if not env.pairs:
+            break
+        (generators, final_pairs), reward, terminated, truncated, _ = env.step(0)
+        step_count += 1
+    
+    assert terminated or len(final_pairs) == 0
+    assert step_count < max_steps  # Should finish in reasonable time
+
+
+def test_gvw_env_produces_valid_groebner_basis():
+    """Test that GVWEnv produces a valid Groebner basis."""
+    env = GVWEnv(DummyIdealGenerator([[x**2 - y, x * y - 1]]), mode="eval")
+    env.reset()
+    
+    # Process all pairs
+    while env.pairs:
+        env.step(0)
+    
+    # Check that final generators form a Groebner basis
+    # Note: GVWEnv doesn't automatically minimize/interreduce, so we do it manually
+    final_generators = env.generators
+    minimal_basis = minimalize(final_generators)
+    reduced_basis = interreduce(minimal_basis) if minimal_basis else []
+    assert_reduced_groebner_basis(reduced_basis)
+
+
+def test_gvw_env_complex_ideal_correct_result():
+    """Test GVWEnv on a more complex ideal."""
+    polynomials = [x**2 + y**2 - 1, x - y, x * y]
+    env = GVWEnv(DummyIdealGenerator([polynomials]), mode="eval")
+    env.reset()
+    
+    # Process all pairs
+    step_count = 0
+    max_steps = 200
+    while env.pairs and step_count < max_steps:
+        env.step(0)
+        step_count += 1
+    
+    # Verify basis is valid
+    assert len(env.generators) > 0
+    assert all(g != 0 for g in env.generators)
+    minimal_basis = minimalize(env.generators)
+    reduced_basis = interreduce(minimal_basis) if minimal_basis else []
+    assert_reduced_groebner_basis(reduced_basis)
+
+
+def test_gvw_env_state_consistency_across_steps():
+    """Test that internal state remains consistent across steps."""
+    env = GVWEnv(DummyIdealGenerator([[x**2 - y, x * y - 1]]), mode="eval")
+    env.reset()
+    
+    while env.pairs:
+        # Check state consistency before step
+        assert len(env._state['jpairs']) == len(env.pairs)
+        assert env.generators == env._state['generators']
+        
+        env.step(0)
+        
+        # Check state consistency after step
+        assert len(env._state['jpairs']) == len(env.pairs)
+        assert env.generators == env._state['generators']
+
+
+def test_gvw_env_handles_zero_polynomials():
+    """Test that GVWEnv handles zero polynomials in input."""
+    env = GVWEnv(DummyIdealGenerator([[x + y, R.zero, x * y]]), mode="eval")
+    (generators, pairs), _ = env.reset()
+    
+    # Process all pairs
+    while env.pairs:
+        env.step(0)
+    
+    # Zero should not appear in final generators
+    assert R.zero not in env.generators
+    assert len(env.generators) > 0
+
+
+def test_gvw_env_empty_ideal():
+    """Test GVWEnv with empty ideal."""
+    env = GVWEnv(DummyIdealGenerator([[]]), mode="eval")
+    (generators, pairs), info = env.reset()
+    
+    assert generators == []
+    assert pairs == []
+    assert info == {}
+
+
+def test_gvw_env_single_generator():
+    """Test GVWEnv with single polynomial."""
+    env = GVWEnv(DummyIdealGenerator([[x + y]]), mode="eval")
+    (generators, pairs), _ = env.reset()
+    
+    assert len(pairs) == 1  # One signature pair for single generator
+    
+    # Process the pair
+    while env.pairs:
+        env.step(0)
+    
+    # Should have one generator in final basis
+    assert len(env.generators) == 1
+
+
+def test_gvw_env_already_groebner_basis():
+    """Test GVWEnv when input is already a Groebner basis."""
+    env = GVWEnv(DummyIdealGenerator([[x, y]]), mode="eval")
+    env.reset()
+    
+    # Process all pairs
+    while env.pairs:
+        env.step(0)
+    
+    # Should produce the same basis (or equivalent)
+    assert len(env.generators) == 2
+    assert_reduced_groebner_basis(env.generators)
+
+
+def test_gvw_env_different_action_orders_produce_same_basis():
+    """Test that different action selection orders produce equivalent bases."""
+    polynomials = [x**2 - y, x * y - 1]
+    
+    # First run: always select first pair
+    env1 = GVWEnv(DummyIdealGenerator([polynomials]), mode="eval")
+    env1.reset()
+    while env1.pairs:
+        env1.step(0)
+    reduced_basis1 = interreduce(minimalize(env1.generators))
+    basis1 = set(reduced_basis1)
+    
+    # Second run: always select last pair
+    env2 = GVWEnv(DummyIdealGenerator([polynomials]), mode="eval")
+    env2.reset()
+    while env2.pairs:
+        env2.step(len(env2.pairs) - 1)
+    reduced_basis2 = interreduce(minimalize(env2.generators))
+    basis2 = set(reduced_basis2)
+    
+    # Both should produce valid Groebner bases
+    assert_reduced_groebner_basis(list(basis1))
+    assert_reduced_groebner_basis(list(basis2))
+    
+    # They should be equivalent (same ideal)
+    assert basis1 == basis2
+
+
+def test_gvw_env_matches_gvw_buchberger_result():
+    """Test that GVWEnv produces the same result as GVW_buchberger."""
+    polynomials = [x**2 - y, x * y - 1]
+    
+    # Compute basis using GVW_buchberger
+    expected_basis, _ = GVW_buchberger(polynomials)
+    
+    # Compute basis using GVWEnv
+    env = GVWEnv(DummyIdealGenerator([polynomials]), mode="eval")
+    env.reset()
+    while env.pairs:
+        env.step(0)
+    
+    # Reduce the env basis to match GVW_buchberger output
+    env_basis = interreduce(minimalize(env.generators)) if env.generators else []
+    
+    # Should match
+    assert set(env_basis) == set(expected_basis)
+
+
+def test_gvw_env_reward_is_always_negative_one():
+    """Test that reward is always -1 for each step."""
+    env = GVWEnv(DummyIdealGenerator([[x**2 - y, x * y - 1]]), mode="eval")
+    env.reset()
+    
+    rewards = []
+    while env.pairs:
+        _, reward, _, _, _ = env.step(0)
+        rewards.append(reward)
+    
+    assert all(r == -1 for r in rewards)
+
+
+def test_gvw_env_multiple_resets():
+    """Test that environment can be reset multiple times."""
+    ideal1 = [x + y]
+    ideal2 = [x**2 - y, x * y - 1]
+    
+    env = GVWEnv(DummyIdealGenerator([ideal1, ideal2]), mode="eval")
+    
+    # First episode
+    (gen1, pairs1), _ = env.reset()
+    initial_pairs_count1 = len(pairs1)
+    
+    # Second episode
+    (gen2, pairs2), _ = env.reset()
+    initial_pairs_count2 = len(pairs2)
+    
+    # Second episode should have different initial state
+    assert initial_pairs_count1 != initial_pairs_count2
+
+
+def test_gvw_env_katsura_systems():
+    """Test GVWEnv on challenging Katsura systems."""
+    for n in [1, 2]:  # Keep n small for reasonable test time
+        R_kat, vars_kat, polynomials = katsura_system(n)
+        expected_basis = katsura_expected_basis(R_kat, vars_kat, n)
+        
+        env = GVWEnv(DummyIdealGenerator([polynomials]), mode="eval")
+        env.reset()
+        
+        # Process all pairs
+        step_count = 0
+        max_steps = 500
+        while env.pairs and step_count < max_steps:
+            env.step(0)
+            step_count += 1
+        
+        # Check we got the correct basis
+        assert set(env.generators) == set(expected_basis)
+        assert_reduced_groebner_basis(env.generators)
+
+
+def test_gvw_env_noncommutative_lcm_pairs():
+    """Test GVWEnv handles pairs with complex LCM relationships."""
+    # This creates a scenario where multiple pairs have overlapping LCMs
+    polynomials = [x**3 + y**2, x*y**2 + x, x**2*y + y**2]
+    env = GVWEnv(DummyIdealGenerator([polynomials]), mode="eval")
+    env.reset()
+    
+    # Should handle all pairs without error
+    step_count = 0
+    max_steps = 300
+    while env.pairs and step_count < max_steps:
+        env.step(0)
+        step_count += 1
+    
+    assert step_count < max_steps
+    reduced_basis = interreduce(minimalize(env.generators)) if env.generators else []
+    assert_reduced_groebner_basis(reduced_basis)
+
+
+def test_gvw_env_homogeneous_ideal():
+    """Test GVWEnv on homogeneous ideals."""
+    polynomials = [x**2 - y**2, x*y]
+    env = GVWEnv(DummyIdealGenerator([polynomials]), mode="eval")
+    env.reset()
+    
+    while env.pairs:
+        env.step(0)
+    
+    assert len(env.generators) > 0
+    assert_reduced_groebner_basis(env.generators)
+
+
+def test_gvw_env_cyclic_ideal():
+    """Test GVWEnv on cyclic-type ideal."""
+    polynomials = [x + y, x * y - 1]
+    env = GVWEnv(DummyIdealGenerator([polynomials]), mode="eval")
+    env.reset()
+    
+    while env.pairs:
+        env.step(0)
+    
+    # Should produce a minimal basis
+    assert len(env.generators) == 2
+    assert all(g.monic() == g for g in env.generators)
+    assert_reduced_groebner_basis(env.generators)
+
+
+def test_gvw_env_signature_updates_correctly():
+    """Test that signatures are updated correctly during computation."""
+    polynomials = [x**2 - y, x * y - 1]
+    env = GVWEnv(DummyIdealGenerator([polynomials]), mode="eval")
+    env.reset()
+    
+    initial_syzygies = len(env._state.get('syzygies', set()))
+    
+    # Process some pairs
+    steps = min(3, len(env.pairs))
+    for _ in range(steps):
+        if env.pairs:
+            env.step(0)
+    
+    # Syzygies may have been discovered
+    final_syzygies = len(env._state.get('syzygies', set()))
+    assert final_syzygies >= initial_syzygies
+
+
+def test_gvw_env_train_mode_tokenizes_correctly():
+    """Test that train mode produces properly tokenized observations."""
+    polynomials = [x**2 + y, x * y + 1]
+    env = GVWEnv(DummyIdealGenerator([polynomials]), mode="train")
+    (tokenized_gen, pairs), _ = env.reset()
+    
+    assert isinstance(tokenized_gen, list)
+    # In train mode, generators should be empty initially
+    assert len(tokenized_gen) == 0
+    
+    # Step and check tokenization
+    if pairs:
+        (tokenized_gen, pairs), _, _, _, _ = env.step(0)
+        if len(tokenized_gen) > 0:
+            # Should be numpy arrays
+            assert all(isinstance(token, np.ndarray) for token in tokenized_gen)
+
+
+def test_gvw_env_large_coefficient_ideal():
+    """Test GVWEnv with polynomials having large coefficients."""
+    R_large, x_l, y_l = sp.ring('x,y', sp.QQ, 'lex')
+    polynomials = [1000*x_l**2 - 500*y_l, 2000*x_l*y_l - 1000]
+    
+    env = GVWEnv(DummyIdealGenerator([polynomials]), mode="eval")
+    env.reset()
+    
+    while env.pairs:
+        env.step(0)
+    
+    # Should still produce monic basis
+    assert all(g.LC == 1 for g in env.generators)
+    reduced_basis = interreduce(minimalize(env.generators)) if env.generators else []
+    assert_reduced_groebner_basis(reduced_basis)
+
+
+def test_gvw_env_with_field_characteristic():
+    """Test GVWEnv with finite field."""
+    R_ff, x_ff, y_ff, z_ff = sp.ring('x,y,z', sp.FF(32003), 'grevlex')
+    polynomials = [x_ff**2 + x_ff*y_ff, y_ff**2 + x_ff*y_ff, z_ff**3 + x_ff]
+    
+    env = GVWEnv(DummyIdealGenerator([polynomials]), mode="eval")
+    env.reset()
+    
+    step_count = 0
+    max_steps = 200
+    while env.pairs and step_count < max_steps:
+        env.step(0)
+        step_count += 1
+    
+    assert step_count < max_steps
+    assert len(env.generators) > 0
+    reduced_basis = interreduce(minimalize(env.generators)) if env.generators else []
+    assert_reduced_groebner_basis(reduced_basis)
