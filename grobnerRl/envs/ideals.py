@@ -5,6 +5,7 @@ import numpy as np
 import sympy as sp
 import random
 import sympy
+from math import prod
 
 
 def cyclic(n, coefficient_ring=sp.FF(32003), order='grevlex'):
@@ -324,8 +325,6 @@ class RandomIdealGenerator(IdealGenerator):
     def seed(self, seed=None):
         self.rng = np.random.default_rng(seed)
 
-
-
 def random_polynomial(max_num_monoms, max_degree, vars, ring):
     num_monoms = random.randint(1, max_num_monoms)
 
@@ -362,3 +361,35 @@ def random_ideal(num_polys, max_num_monoms, max_degree, num_vars, field, order):
     ideal = [random_polynomial(max_num_monoms, max_degree, vars, R) for _ in range(num_polys)]
 
     return ideal
+
+
+class SAT3IdealGenerator(IdealGenerator):
+    '''
+    Generator of ideals corresponding to random 3-SAT instances.
+
+    Parameters
+    ----------
+    num_vars : int
+        Number of boolean variables in the 3-SAT instance.
+    num_clauses : int
+        Number of clauses in the 3-SAT instance.
+    '''
+
+    def __init__(self, num_vars, num_clauses):
+        self.num_vars = num_vars
+        self.num_clauses = num_clauses
+    
+    def __next__(self):
+        R, vars = sympy.xring([f'x{i}' for i in range(self.num_vars)], sp.FF(2), 'lex')
+        var_polys = [vars[i]*(1 - vars[i]) for i in range(self.num_vars)]
+
+        clauses_polys = []
+        for _ in range(self.num_clauses):
+            clause_vars = random.sample(vars, 3)
+            negations = random.choices([0, 1], k=3)  # 0 means negated, 1 means not negated
+
+            # build the polynomial for the clause
+            clause_poly = prod((neg - var) for var, neg in zip(clause_vars, negations))
+            clauses_polys.append(clause_poly)
+
+        return var_polys + clauses_polys

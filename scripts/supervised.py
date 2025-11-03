@@ -10,7 +10,7 @@ import numpy as np
 from tqdm import tqdm
 from implementations.utils import plot_learning_process
 from grobnerRl.envs.deepgroebner import BuchbergerEnv, BuchbergerAgent
-from grobnerRl.envs.ideals import RandomIdealGenerator
+from grobnerRl.envs.ideals import RandomIdealGenerator, SAT3IdealGenerator
 from grobnerRl.models import Extractor, GrobnerPolicy, GrobnerCritic
 from grobnerRl.data import JsonDataset, collate, generate_expert_data
 
@@ -251,12 +251,13 @@ def evaluate_policy(model, actor_path, env, model_env, device, expert_agent):
 if __name__ == "__main__":
     torch.manual_seed(42)
     num_vars = 3
+    num_clauses = 10
     max_degree = 4
     num_polys = 4
     coeff_field = 37
     length_lambda = 0.5
-    ideal_dist = f'{num_vars}-{max_degree}-{num_polys}'
-    ideal_gen = RandomIdealGenerator(num_vars, max_degree, num_polys, length_lambda, constants=True, coefficient_ring=sympy.FiniteField(coeff_field))
+    ideal_dist = f'{num_vars}-{num_clauses}_sat3'
+    ideal_gen = SAT3IdealGenerator(num_vars, num_clauses)
     device = 'cpu'
     data_path = os.path.join('data', f'{ideal_dist}.json')
     actor_path = os.path.join('models', 'imitation_policy.pth')
@@ -266,11 +267,11 @@ if __name__ == "__main__":
     polys_embedding_dim = 128
     ideal_depth = 4
     ideal_num_heads = 4
-    extractor_params = (num_vars, monoms_embedding_dim, polys_embedding_dim, ideal_depth, ideal_num_heads)
+    extractor_params = (num_vars + 1, monoms_embedding_dim, polys_embedding_dim, ideal_depth, ideal_num_heads)
     lr = 1e-4
     gamma = 0.99
 
-    dataset_size = int(1e6)
+    dataset_size = int(1e5)
     batch_size = 32
     num_workers = 2
     epochs = 250
