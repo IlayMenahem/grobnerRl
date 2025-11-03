@@ -23,7 +23,7 @@ def tokenize(ideal: Sequence[PolyElement]) -> list[np.ndarray]:
 
     Returns: tokenized ideal
     '''
-    polys_monomials = [poly.monoms() for poly in ideal]
+    polys_monomials = [np.concat((np.array(list(map(int, poly.coeffs()))).reshape((1, -1)).T, np.array(poly.monoms())), axis=1) for poly in ideal]
 
     return polys_monomials
 
@@ -377,7 +377,7 @@ class BuchbergerEnv(gym.Env):
     """
 
     def __init__(self, ideal_dist='3-20-10-uniform', elimination='gebauermoeller',
-                 rewards='additions', sort_input=False, sort_reducers=True, mode='eval'):
+                 rewards='reductions', sort_input=False, sort_reducers=True, mode='eval'):
 
         self.mode = mode
         self.ideal_gen = self._make_ideal_gen(ideal_dist)
@@ -494,143 +494,108 @@ class BuchbergerEnv(gym.Env):
             return parse_ideal_dist(ideal_dist)
 
 
-def lead_monomials_vector(f, ring, k=2, dtype=np.int32):
-    """Return the concatenated exponent vectors of the k lead monomials of f."""
-    it = iter(f.monoms())
-    return np.array([next(it, (0,) * ring.ngens) for _ in range(k)]).flatten().astype(dtype)
+class OracleAgent:
+    '''
+    An agent that computes the groebner basis and then at each step selects the pair that yields the polynomial
+    with a lead monomial that is closest to a lead monomial of the final groebner basis
+    '''
+    env: BuchbergerEnv
+    reductions: list[tuple[int,int]]
 
-
-class LeadMonomialsEnv:
-    """A BuchbergerEnv with state the matrix of the pairs' lead monomials.
-
-    Parameters
-    ----------
-    ideal_dist : str, optional
-        IdealGenerator or string naming the ideal distribution.
-    elimination : {'gebauermoeller', 'lcm', 'none'}, optional
-        Strategy for pair elimination.
-    rewards : {'additions', 'reductions'}, optional
-        Reward value for each step.
-    sort_input : bool, optional
-        Whether to sort the initial generating set by lead monomial.
-    sort_reducers : bool, optional
-        Whether to choose reducers in sorted order by lead monomial.
-    k : int, optional
-        Number of lead monomials shown for each polynomial.
-    dtype : data-type, optional
-        Data-type for the state matrix.
-
-    Examples
-    --------
-    >>> env = LeadMonomialsEnv()
-    >>> env.seed(123)
-    >>> env.reset()
-    array([[ 6,  4,  2,  0, 16,  3],
-           [ 6,  4,  2, 18,  0,  2],
-           [ 6,  4,  2, 11,  0,  8],
-           [18,  0,  2, 11,  0,  8],
-           [11,  0,  8,  3,  0, 17],
-           [ 6,  4,  2,  2,  4, 13],
-           [ 3,  0, 17,  2,  4, 13],
-           [ 6,  4,  2,  6,  6,  5],
-           [ 6,  4,  2,  2,  8,  6],
-           [ 0, 16,  3,  2,  8,  6],
-           [ 2,  4, 13,  2,  8,  6],
-           [ 2,  8,  6,  4, 10,  6],
-           [ 6,  4,  2,  2, 17,  0],
-           [ 0, 16,  3,  2, 17,  0]], dtype=int32)
-    >>> env.step(3)
-    (array([[ 6,  4,  2,  0, 16,  3],
-            [ 6,  4,  2, 18,  0,  2],
-            [ 6,  4,  2, 11,  0,  8],
-            [11,  0,  8,  3,  0, 17],
-            [ 6,  4,  2,  2,  4, 13],
-            [ 3,  0, 17,  2,  4, 13],
-            [ 6,  4,  2,  6,  6,  5],
-            [ 6,  4,  2,  2,  8,  6],
-            [ 0, 16,  3,  2,  8,  6],
-            [ 2,  4, 13,  2,  8,  6],
-            [ 2,  8,  6,  4, 10,  6],
-            [ 6,  4,  2,  2, 17,  0],
-            [ 0, 16,  3,  2, 17,  0],
-            [ 6,  4,  2,  4,  6, 10],
-            [ 2,  4, 13,  4,  6, 10],
-            [ 2,  8,  6,  4,  6, 10]], dtype=int32),
-     -3.0,
-     False,
-     {})
-
-    """
-
-    def __init__(self, ideal_dist='3-20-10-uniform', elimination='gebauermoeller',
-                 rewards='additions', sort_input=False, sort_reducers=True,
-                 k=1, dtype=np.int32):
-        self.env = BuchbergerEnv(ideal_dist, elimination, rewards, sort_input, sort_reducers)
-        self.ring = self.env.ideal_gen.ring
-        self.k = k
-        self.dtype = dtype
-        self.leads = []
-
-    def reset(self):
-        (G, _), _ = self.env.reset()
-        self.leads = [lead_monomials_vector(g, self.ring, k=self.k, dtype=self.dtype) for g in G]
-
-        return self._matrix(), {}
-
-    def step(self, action):
-        (G, P), reward, terminated, truncated, info = self.env.step(self.env.P[action])
-
-        if len(G) > len(self.leads):
-            self.leads.append(lead_monomials_vector(G[-1], self.ring, k=self.k, dtype=self.dtype))
-
-        return self._matrix(), reward, terminated, truncated, info
-
-    def seed(self, seed=None):
-        self.env.seed(seed)
-
-    def value(self, gamma=0.99):
-        return self.env.value(gamma)
-
-    def _matrix(self):
-        n = self.env.G[0].ring.ngens
-        mat = np.empty((len(self.env.P), 2 * n * self.k), dtype=self.dtype)
-
-        for i, p in enumerate(self.env.P):
-            mat[i, :n*self.k] = self.leads[p[0]]
-            mat[i, n*self.k:] = self.leads[p[1]]
-
-        return mat
-
-
-class LeadMonomialsAgent:
-    """An agent that follows standard selection strategies.
-
-    Parameters
-    ----------
-    selection : {'first', 'degree', 'random'}
-        The selection strategy used to pick pairs.
-
-    """
-
-    def __init__(self, selection='degree', k=1):
-        self.strategy = selection
-        self.k = k
+    def __init__(self, env: BuchbergerEnv):
+        self.env = env
+        self.reductions = []
 
     def act(self, state):
-        if self.strategy == 'first':
-            return 0
-        elif self.strategy == 'degree':
-            n = state.shape[1] // (2 * self.k)
-            m = state.shape[1] // 2
-            return np.argmin(np.sum(np.maximum(state[:, :n], state[:, m:m+n]), axis=1))
-        elif self.strategy == 'random':
-            return np.random.choice(len(state))
+        if self.reductions:
+            return self.reductions.pop(0)
+
+        def distance(m1: tuple[int,...], m2: tuple[int,...]) -> int:
+            return sum(abs(a - b) for a, b in zip(m1, m2))
+
+        def get_groebner_lead_monomials(generators: list[PolyElement]) -> list[tuple[int,...]]:
+            generators = [f.copy() for f in self.env.G]
+            groebner_basis, _ = buchberger(generators, elimination=self.env.elimination, rewards=self.env.rewards, sort_reducers=self.env.sort_reducers)
+            groebner_lead_monomials = sorted([g.LM for g in groebner_basis], key=lambda m: self.env.order(m))
+
+            return groebner_lead_monomials
+
+        def compute_reductions(P: list[tuple[int, int]], G: list[PolyElement], G_: list[PolyElement]) -> dict[tuple[int, int], PolyElement]:
+            """Compute all non-zero reductions for pairs in P."""
+            after_reductions: dict[tuple[int, int], PolyElement] = {}
+
+            for pair in P:
+                i, j = pair
+                s = spoly(G[i], G[j])
+                r, _ = reduce(s, G_)
+
+                if r != 0:
+                    after_reductions[pair] = r.monic()
+
+            return after_reductions
+
+        def select_best_pair(after_reductions: dict[tuple[int, int], PolyElement], groebner_lead_monomials: list[tuple[int, ...]], P: list[tuple[int, int]]) -> tuple[int, int] | None:
+            """Select the pair with lead monomial closest to groebner basis."""
+            best_pair: tuple[int, int] | None = min(
+                after_reductions.keys(),
+                key=lambda p: min(distance(after_reductions[p].LM, m) for m in groebner_lead_monomials),
+                default=None
+            )
+
+            # If no non-zero reduction found, pick any pair
+            if best_pair is None and len(P) > 0:
+                best_pair = P[0]
+
+            return best_pair
+
+        def perform_reduction_step(best_pair: tuple[int, int], G: list[PolyElement], P: list[tuple[int, int]], G_: list[PolyElement]) -> tuple[list[PolyElement], list[tuple[int, int]], list[PolyElement], bool]:
+            """Perform the reduction step and update G, P, G_."""
+            P.remove(best_pair)
+            i, j = best_pair
+            s = spoly(G[i], G[j])
+            r, _ = reduce(s, G_)
+
+            if r == 0:
+                return G, P, G_, False
+
+            r_monic = r.monic()
+            G, P = update(G, P, r_monic, strategy=self.env.elimination)
+
+            if self.env.sort_reducers:
+                key = self.env.order(r_monic.LM)
+                index = bisect.bisect([self.env.order(g.LM) for g in G_], key)
+                G_.insert(index, r_monic)
+            else:
+                G_ = G
+
+            return G, P, G_, True
+
+        groebner_lead_monomials = get_groebner_lead_monomials(self.env.G)
+
+        G = [g.copy() for g in self.env.G]
+        P = self.env.P.copy()
+        G_ = [g.copy() for g in self.env.G_]
+
+        while len(P) > 0:
+            print(f"Remaining pairs: {len(P)}")
+            after_reductions = compute_reductions(P, G, G_)
+
+            best_pair = select_best_pair(after_reductions, groebner_lead_monomials, P)
+
+            self.reductions.append(best_pair)
+
+            G, P, G_, should_continue = perform_reduction_step(best_pair, G, P, G_)
+
+            if not should_continue:
+                continue
+
+        return self.reductions.pop(0)
 
 
 class MCTSAgent:
     """
     An agent that uses MCTS (Monte Carlo Tree Search) to optimize pair selection.
-    
+
     Parameters
     ----------
     env : BuchbergerEnv
@@ -655,62 +620,62 @@ class MCTSAgent:
     def act(self, state):
         """
         Select the best action using MCTS.
-        
+
         Parameters
         ----------
         state : tuple
             The current state (G, P) where G is the polynomial list and P is the pair set.
-            
+
         Returns
         -------
         tuple
             The selected pair (i, j) to reduce.
         """
         G, P = state
-        
+
         if len(P) == 0:
             return None
-        
+
         if len(P) == 1:
             return P[0]
-        
+
         # Initialize root node and run simulations
         root = MCTSNode(state=state, parent=None, action=None)
-        
+
         for _ in range(self.n_simulations):
             self._run_simulation(root, G, P)
-        
+
         # Return the action with the highest visit count
         return self._select_best_action(root)
-    
+
     def _run_simulation(self, root, G, P):
         """Run a single MCTS simulation from the root node."""
         sim_env = self._copy_env_state(G, P)
         node = root
-        
+
         # Selection phase
         node = self._select_node(node, sim_env)
-        
+
         # Expansion phase
         node = self._expand_node(node, sim_env)
-        
+
         # Simulation phase (rollout)
         total_reward = self._rollout(sim_env)
-        
+
         # Backpropagation phase
         self._backpropagate(node, total_reward)
-    
+
     def _select_node(self, node, sim_env):
         """
         Selection phase: traverse tree using UCB1.
-        
+
         Parameters
         ----------
         node : MCTSNode
             The current node to start selection from.
         sim_env : BuchbergerEnv
             The simulation environment.
-            
+
         Returns
         -------
         MCTSNode
@@ -722,18 +687,18 @@ class MCTSAgent:
             if terminated or truncated:
                 break
         return node
-    
+
     def _expand_node(self, node, sim_env):
         """
         Expansion phase: add a new child node.
-        
+
         Parameters
         ----------
         node : MCTSNode
             The node to expand from.
         sim_env : BuchbergerEnv
             The simulation environment.
-            
+
         Returns
         -------
         MCTSNode
@@ -746,16 +711,16 @@ class MCTSAgent:
                 child_state = obs if not (terminated or truncated) else None
                 node = node.add_child(action, child_state)
         return node
-    
+
     def _rollout(self, sim_env):
         """
         Simulation phase: rollout to terminal state using the rollout policy.
-        
+
         Parameters
         ----------
         sim_env : BuchbergerEnv
             The simulation environment.
-            
+
         Returns
         -------
         float
@@ -765,25 +730,25 @@ class MCTSAgent:
         discount = 1.0
         terminated = False
         truncated = False
-        
+
         while not (terminated or truncated):
             if len(sim_env.P) == 0:
                 break
-            
+
             # Use BuchbergerAgent for rollout policy
             state = (sim_env.G, sim_env.P)
             action = self.rollout_agent.act(state)
-            
+
             _, reward, terminated, truncated, _ = sim_env.step(action)
             total_reward += discount * reward
             discount *= self.gamma
-        
+
         return total_reward
-    
+
     def _backpropagate(self, node, total_reward):
         """
         Backpropagation phase: update node statistics up the tree.
-        
+
         Parameters
         ----------
         node : MCTSNode
@@ -795,16 +760,16 @@ class MCTSAgent:
             node.visits += 1
             node.value += total_reward
             node = node.parent
-    
+
     def _select_best_action(self, root):
         """
         Select the best action from the root node.
-        
+
         Parameters
         ----------
         root : MCTSNode
             The root node of the MCTS tree.
-            
+
         Returns
         -------
         tuple
@@ -814,7 +779,7 @@ class MCTSAgent:
             return None
         best_child = max(root.children, key=lambda c: c.visits)
         return best_child.action
-    
+
     def _copy_env_state(self, G, P):
         """Create a copy of the environment with the current state."""
         # Create a new environment instance
@@ -826,13 +791,13 @@ class MCTSAgent:
             sort_reducers=self.env.sort_reducers,
             mode=self.env.mode
         )
-        
+
         # Copy the state
         env_copy.G = [g.copy() for g in G]
         env_copy.lmG = [g.LM for g in env_copy.G]
         env_copy.P = P.copy()
         env_copy.order = G[0].ring.order if G else None
-        
+
         if self.env.sort_reducers:
             env_copy.G_ = [g.copy() for g in self.env.G_]
             env_copy.lmG_ = [g.LM for g in env_copy.G_]
@@ -840,14 +805,14 @@ class MCTSAgent:
         else:
             env_copy.G_ = env_copy.G
             env_copy.lmG_ = env_copy.lmG
-        
+
         return env_copy
 
 
 class MCTSNode:
     """
     A node in the MCTS tree.
-    
+
     Parameters
     ----------
     state : tuple or None
@@ -857,7 +822,7 @@ class MCTSNode:
     action : tuple or None
         The action that led to this node.
     """
-    
+
     def __init__(self, state, parent, action):
         self.state = state
         self.parent = parent
@@ -866,36 +831,36 @@ class MCTSNode:
         self.visits = 0
         self.value = 0.0
         self.untried_actions = list(state[1]) if state is not None else []
-    
+
     def is_fully_expanded(self):
         """Check if all actions from this node have been tried."""
         return len(self.untried_actions) == 0
-    
+
     def is_terminal(self):
         """Check if this is a terminal node (no more pairs to reduce)."""
         return self.state is None or len(self.state[1]) == 0
-    
+
     def get_untried_action(self):
         """Get an untried action from this node."""
         if len(self.untried_actions) > 0:
             return self.untried_actions.pop(0)
         return None
-    
+
     def add_child(self, action, state):
         """Add a child node for the given action and state."""
         child = MCTSNode(state=state, parent=self, action=action)
         self.children.append(child)
         return child
-    
+
     def best_child(self, c):
         """
         Select the best child using UCB1 formula.
-        
+
         Parameters
         ----------
         c : float
             Exploration constant.
-            
+
         Returns
         -------
         MCTSNode

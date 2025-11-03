@@ -1,6 +1,7 @@
 import os
 import json
 import numpy as np
+import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
 from itertools import accumulate
@@ -15,17 +16,6 @@ class JsonDataset(Dataset):
         self.states = dataset[obs]
         self.actions = dataset[labels]
 
-        states = []
-        for state in self.states:
-            ideal, pairs = state
-
-            ideal = [np.array(poly) for poly in ideal]
-            pairs = [tuple(pair) for pair in pairs]
-
-            states.append((ideal, pairs))
-
-        self.states = states
-
     def __len__(self):
         return len(self.states)
 
@@ -37,38 +27,37 @@ class JsonDataset(Dataset):
 
 
 def collate(batch):
-    import torch
+    """
+    Collate function that creates nested tensors for variable-length polynomial ideals.
 
+    Each state is a tuple (ideal, selectables) where:
+    - ideal: list of polynomials (each polynomial is a numpy array of monomials)
+    - selectables: list of tuples indicating valid actions
+
+    Returns:
+    - nested_batch: List of nested tensors (one per batch item), representing the batch
+    - selectables_batch: List of selectables for each batch item
+    - actions_tensor: Tensor of actions
+    """
     states, actions = map(list, zip(*batch))
+
+    nested_batch = []
+    selectables_batch = []
+
+    for state in states:
+        ideal, pairs = state
+
+        pairs = [tuple(pair) for pair in pairs]
+
+        poly_tensors = [torch.from_numpy(np.array(poly)).float() for poly in ideal]
+        nested_ideal = torch.nested.nested_tensor(poly_tensors, layout=torch.jagged)
+
+        nested_batch.append(nested_ideal)
+        selectables_batch.append(pairs)
 
     actions_tensor = torch.tensor(actions, dtype=torch.long)
 
-    class StatesBatch:
-        def __init__(self, states):
-            self.states = states
-
-        def to(self, device, non_blocking=False):
-            import torch
-
-            tensor_states = []
-            for ideal, pairs in self.states:
-                ideal_tensor = [torch.from_numpy(poly).to(device, non_blocking=non_blocking) for poly in ideal]
-                tensor_states.append((ideal_tensor, pairs))
-
-            new_batch = StatesBatch(tensor_states)
-
-            return new_batch
-
-        def __iter__(self):
-            return iter(self.states)
-
-        def __getitem__(self, idx):
-            return self.states[idx]
-
-        def __len__(self):
-            return len(self.states)
-
-    return StatesBatch(states), actions_tensor
+    return (nested_batch, selectables_batch), actions_tensor
 
 
 def generate_expert_data(env, size, path, expert_agent, gamma=0.99):

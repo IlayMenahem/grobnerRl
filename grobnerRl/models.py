@@ -1,7 +1,6 @@
 import torch
 from torch import nn
 import numpy as np
-from torch.nn.utils.rnn import pad_sequence
 
 
 class DeepSetsEncoder(nn.Module):
@@ -34,22 +33,21 @@ class DeepSetsEncoder(nn.Module):
             nn.Linear(rho_hidden, output_dim)
         )
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor|None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        x: Tensor of shape (n, d) or (batch_size, n, d)
-        mask: Optional tensor of shape (batch_size, n) for padded sequences
+        x: Nested tensor with jagged layout or regular tensor
         returns: Tensor of shape (d',) or (batch_size, d',)
         """
-        h = self.phi(x)
+        components = x.unbind()
+        processed = []
 
-        if mask is not None:
-            # Apply mask to ignore padded elements
-            h = h * mask.unsqueeze(-1)
-            h_sum = torch.sum(h, dim=-2)
-        else:
-            h_sum = torch.sum(h, dim=-2 if x.dim() == 3 else 0)
+        for comp in components:
+            h = self.phi(comp)
+            h_sum = h.sum(dim=0)
+            processed.append(h_sum)
 
-        res = self.rho(h_sum)
+        stacked = torch.stack(processed)
+        res = self.rho(stacked)
 
         return res
 
@@ -77,34 +75,44 @@ class Extractor(nn.Module):
 
         self.polynomial_embedder = DeepSetsEncoder(num_vars, monoms_embedding_dim, polys_embedding_dim, polys_embedding_dim)
         self.ideal_transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(polys_embedding_dim, ideal_num_heads, dim_feedforward=2*polys_embedding_dim, dropout=0.1, batch_first=True),
+            nn.TransformerEncoderLayer(polys_embedding_dim, ideal_num_heads, dim_feedforward=4*polys_embedding_dim, dropout=0.1, batch_first=True),
             num_layers=ideal_depth
         )
 
-    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor:
-        if isinstance(obs, list):
-            return pad_sequence([self.forward(o) for o in obs], batch_first=True)
+    def forward(self, obs: tuple|list) -> torch.Tensor:
+        """
+        Forward pass that handles batched nested tensors.
 
-        ideal: list[np.ndarray] = obs[0]
-        selectables: list[tuple[int,int]] = obs[1]
+        Args:
+            obs: tuple of (nested_batch, selectables_batch) where:
+                - nested_batch: list of nested tensors (one per batch item)
+                - selectables_batch: list of selectables for each batch item
 
-        # make batch a padded tensor
-        _ideal_tensors = [torch.as_tensor(poly, dtype=torch.float32) for poly in ideal]
-        _ideal_padded = pad_sequence(_ideal_tensors, batch_first=True)
+        Returns:
+            List of tensors (for batched input) or single tensor
+        """
+        def process_single(nested_ideal, selectables):
+            polynomial_encodings = self.polynomial_embedder(nested_ideal)
+            ideal_embeddings = self.ideal_transformer(polynomial_encodings.unsqueeze(0)).squeeze(0)
+            values = torch.matmul(ideal_embeddings, ideal_embeddings.T)
+            vals = apply_mask(values, selectables)
 
-        # Create mask to ignore padded elements
-        lengths = torch.as_tensor([len(poly) for poly in ideal])
-        max_len = _ideal_padded.size(1)
-        mask = torch.arange(max_len).unsqueeze(0) < lengths.unsqueeze(1)
+            return vals
 
-        polynomial_encodings = self.polynomial_embedder(_ideal_padded, mask)
+        nested_batch, selectables_batch = obs
 
-        ideal_embeddings = self.ideal_transformer(polynomial_encodings.unsqueeze(0)).squeeze(0)
-        values = torch.matmul(ideal_embeddings, ideal_embeddings.T)
+        if isinstance(nested_batch, list):
+            batch_outputs = []
 
-        vals = apply_mask(values, selectables)
+            for nested_ideal, selectables in zip(nested_batch, selectables_batch):
+                vals = process_single(nested_ideal, selectables)
+                batch_outputs.append(vals)
 
-        return vals
+            return batch_outputs
+        else:
+            vals = process_single(nested_batch, selectables_batch)
+
+            return vals
 
 
 class GrobnerPolicy(nn.Module):
@@ -115,15 +123,10 @@ class GrobnerPolicy(nn.Module):
 
         self.extractor = extractor
 
-    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor:
+    def forward(self, obs: tuple|list) -> torch.Tensor:
+        # Return logits for training, not probabilities
         vals = self.extractor(obs)
-
-        if isinstance(obs, list):
-            return torch.softmax(vals, dim=-1)
-
-        probs = torch.softmax(vals, dim=0)
-
-        return probs
+        return vals
 
 
 class GrobnerValue(nn.Module):
@@ -134,7 +137,7 @@ class GrobnerValue(nn.Module):
 
         self.extractor = extractor
 
-    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor:
+    def forward(self, obs: tuple|list) -> torch.Tensor:
         vals = self.extractor(obs)
 
         return vals
@@ -148,11 +151,13 @@ class GrobnerCritic(nn.Module):
 
         self.extractor = extractor
 
-    def forward(self, obs: tuple|list[tuple]) -> torch.Tensor:
-        if isinstance(obs, list):
-            return torch.stack([self.forward(o) for o in obs])
-
+    def forward(self, obs: tuple|list) -> torch.Tensor:
         vals = self.extractor(obs)
+
+        if isinstance(vals, list):
+            # Batched output - take max of each
+            return torch.stack([torch.max(v) for v in vals])
+
         max_val = torch.max(vals)
 
         return max_val
