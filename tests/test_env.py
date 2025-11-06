@@ -261,11 +261,12 @@ def test_buchberger_env_reset_eval_mode():
 
 
 def test_buchberger_env_reset_train_mode_tokenizes_state():
-    env = BuchbergerEnv(DummyIdealGenerator([[x + y]]), mode="train")
+    env = BuchbergerEnv(DummyIdealGenerator([[x + y, x * y + 1]]), mode="train")
     (tokenized_generators, pairs), info = env.reset()
-    assert len(tokenized_generators) == 1
+    assert len(tokenized_generators) == 2
     assert np.array_equal(tokenized_generators[0], expected_token(x + y))
-    assert pairs == []
+    assert np.array_equal(tokenized_generators[1], expected_token(x * y + 1))
+    assert pairs == [(0, 1)]
     assert info == {}
 
 
@@ -288,13 +289,19 @@ def test_buchberger_env_step_accepts_integer_actions():
     assert env.pairs == [(0, 2), (1, 2)]
 
 
-def test_buchberger_env_step_zero_remainder_terminates_episode():
-    env = BuchbergerEnv(DummyIdealGenerator([[x, y]]), mode="eval")
+def test_buchberger_env_step_zero_remainder_leaves_state_unchanged():
+    env = BuchbergerEnv(DummyIdealGenerator([[x**2, x * y]]), mode="eval")
     env.reset()
+    initial_generators = list(env.generators)
+    initial_pairs = list(env.pairs)
+    assert initial_pairs  # ensure non-empty observation
+
     _, reward, terminated, truncated, _ = env.step((0, 1))
     assert reward == -1
-    assert terminated is True
+    assert terminated is False
     assert truncated is False
+    assert env.generators == initial_generators
+    assert env.pairs == initial_pairs
 
 def test_gvw_buchberger_simple_ideal():
     basis, syzygies = GVW_buchberger([x * y - 1, x - 1])
@@ -400,6 +407,28 @@ def test_katsura_systems(n):
 R1, x1, y1, z1 = sp.ring('x,y,z', sp.FF(32003), 'grevlex')
 R2, a, b, c, d = sp.ring('a,b,c,d', sp.QQ, 'lex')
 R3, t, u, v = sp.ring('t,u,v', sp.FF(101), 'grlex')
+
+
+BUCHBERGER_IDEAL_CASES = [
+    ([], []),
+    ([y1 - x1**2, z1 - x1**3], [y1**2 - x1*z1, x1*y1 - z1, x1**2 - y1]),
+    ([b - a**2, c - a**3], [b**3 - c**2, a*c - b**2, a*b - c, a**2 - b]),
+    ([u - t**2, v - t**3], [t*v - u**2, t*u - v, t**2 - u, u**3 - v**2]),
+    ([x1 + y1 + z1, x1*y1 + y1*z1 + x1*z1, x1*y1*z1 - 1], [x1 + y1 + z1, y1**2 + y1*z1 + z1**2, z1**3 - 1]),
+]
+
+
+BUCHBERGER_ENV_IDEAL_CASES = [
+    case for case in BUCHBERGER_IDEAL_CASES if len(case[0]) >= 2
+]
+
+
+def assert_basis_equal(actual: list[PolyElement], expected: list[PolyElement]) -> None:
+    assert len(actual) == len(expected)
+    for poly in expected:
+        assert any(poly == candidate for candidate in actual)
+    for poly in actual:
+        assert any(poly == candidate for candidate in expected)
 
 
 @pytest.mark.parametrize("f, g, s", [
@@ -566,18 +595,51 @@ def test_interreduce_from_buchberger(G, Gred):
     assert interreduce(G) == Gred
 
 
-@pytest.mark.parametrize("F, G", [
-    ([], []),
-    ([y1 - x1**2, z1 - x1**3], [y1**2 - x1*z1, x1*y1 - z1, x1**2 - y1]),
-    ([b - a**2, c - a**3], [b**3 - c**2, a*c - b**2, a*b - c, a**2 - b]),
-    ([u - t**2, v - t**3], [t*v - u**2, t*u - v, t**2 - u, u**3 - v**2]),
-    ([x1 + y1 + z1, x1*y1 + y1*z1 + x1*z1, x1*y1*z1 - 1], [x1 + y1 + z1, y1**2 + y1*z1 + z1**2, z1**3 - 1]),
-])
+@pytest.mark.parametrize("F, G", BUCHBERGER_IDEAL_CASES)
 def test_buchberger_from_buchberger(F, G):
     result, _ = GVW_buchberger(F)
     assert result == G
     result2, _ = buchberger(F)
     assert result2 == G
+
+
+@pytest.mark.parametrize("F, G", BUCHBERGER_ENV_IDEAL_CASES)
+def test_buchberger_env_from_buchberger(F, G):
+    env = BuchbergerEnv(DummyIdealGenerator([F]), mode="eval")
+    env.reset()
+
+    step_count = 0
+    max_steps = 7
+    while env.pairs and step_count < max_steps:
+        pair = env.pairs.pop(0)
+        env.step(pair)
+        step_count += 1
+
+    assert not env.pairs
+    assert step_count < max_steps
+
+    final_basis = interreduce(minimalize(env.generators)) if env.generators else []
+    assert_basis_equal(final_basis, G)
+    assert_reduced_groebner_basis(final_basis)
+
+
+@pytest.mark.parametrize("F, G", BUCHBERGER_IDEAL_CASES)
+def test_gvw_env_from_buchberger(F, G):
+    env = GVWEnv(DummyIdealGenerator([F]), mode="eval")
+    env.reset()
+
+    step_count = 0
+    max_steps = 5
+    while env.pairs and step_count < max_steps:
+        env.step(0)
+        step_count += 1
+
+    assert not env.pairs
+    assert step_count < max_steps
+
+    final_basis = interreduce(minimalize(env.generators)) if env.generators else []
+    assert_basis_equal(final_basis, G)
+    assert_reduced_groebner_basis(final_basis)
 
 
 # ===========================
@@ -637,9 +699,10 @@ def test_gvw_env_step_with_signature_action_processes_correct_pair():
     
     # Get the first signature pair
     signature = env.pairs[0]
+    signature_action: Any = signature
     
     # Step using the signature
-    (generators, pairs), reward, terminated, truncated, info = env.step(signature)
+    (generators, pairs), reward, terminated, truncated, info = env.step(signature_action)
     
     assert reward == -1
     assert not truncated
@@ -654,9 +717,10 @@ def test_gvw_env_step_with_invalid_signature_raises_error():
     
     # Create a fake signature that doesn't exist
     fake_signature = ((999, 999), 999)
+    fake_signature_action: Any = fake_signature
     
     with pytest.raises(ValueError, match="signature not found"):
-        env.step(fake_signature)
+        env.step(fake_signature_action)
 
 
 def test_gvw_env_step_with_invalid_action_type_raises_error():

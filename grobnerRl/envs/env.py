@@ -6,8 +6,8 @@ from collections import defaultdict
 from copy import deepcopy
 from collections.abc import Sequence
 from typing import Any, Callable
+from abc import ABC, abstractmethod
 
-import gymnasium as gym
 from sympy.polys.rings import PolyElement
 import numpy as np
 
@@ -189,7 +189,11 @@ def minimalize(G: list[PolyElement]) -> list[PolyElement]:
     - The minimal Groebner basis.
     '''
 
-    R = G[0].ring if len(G) > 0 else None
+    if len(G) > 0:
+        R = G[0].ring 
+    else:
+        return []
+    
     Gmin = []
     for f in sorted(G, key=lambda h: R.order(h.LM)):
         if all(not R.monomial_div(f.LM, g.LM) for g in Gmin):
@@ -618,7 +622,53 @@ def GVW_buchberger(G: list[PolyElement]) -> tuple[list[PolyElement], list[tuple[
     return basis, syzygies
 
 
-class BuchbergerEnv(gym.Env):
+class BaseEnv(ABC):
+    generators: list[PolyElement]
+    pairs: list[tuple[int, int]]
+
+    @abstractmethod
+    def __init__(self, ideal_generator: IdealGenerator):
+        '''
+        Initialize the base environment.
+        
+        Parameters:
+        ideal_generator: IdealGenerator - Generator for ideals to be used in the environment.
+        '''
+        pass
+
+    @abstractmethod
+    def reset(self, seed = None, options = None) -> tuple[tuple[list[np.ndarray], list[tuple[int, int]]], dict]:
+        '''
+        Reset the environment to start a new episode.
+
+        Parameters:
+        seed: Optional seed for random number generation.
+        options: Optional additional options.
+        
+        Returns:
+        observation: The initial observation for the environment.
+        info: Additional information about the environment state.
+        '''
+        pass
+
+    @abstractmethod
+    def step(self, action: int | tuple[int, int]) -> tuple[tuple[list[np.ndarray], list[tuple[int, int]]], int, bool, bool, dict]:
+        '''
+        Take a step in the environment based on the given action.
+
+        Parameters:
+        action: int | tuple[int, int] - The action to take (either an integer or a pair of indices).
+
+        Returns:
+        observation: The new observation after taking the action.
+        reward: The reward received after taking the action.
+        terminated: Boolean indicating if the episode has terminated.
+        truncated: Boolean indicating if the episode has been truncated.
+        info: Additional information about the environment state.
+        '''
+        pass
+
+class BuchbergerEnv(BaseEnv):
     generators: list[PolyElement]
     pairs: list[tuple[int, int]]
 
@@ -630,7 +680,7 @@ class BuchbergerEnv(gym.Env):
         ideal_generator: IdealGenerator - Generator for ideals to be used in the environment.
         mode: str - Mode of the environment ('train' or 'eval').
         '''
-        super().__init__()
+        super().__init__(ideal_generator)
         self.ideal_generator = ideal_generator
         self.mode = mode
 
@@ -654,6 +704,9 @@ class BuchbergerEnv(gym.Env):
         for g in generators:
             if g != 0:
                 self.generators, self.pairs = update(self.generators, self.pairs, g.monic())
+
+        if not self.generators or not self.pairs:
+            self.reset(seed, options)
 
         observation = (self.generators, self.pairs)
         if self.mode == 'train':
@@ -699,11 +752,11 @@ class BuchbergerEnv(gym.Env):
         return observation, reward, terminated, truncated, {}
     
 
-class GVWEnv(gym.Env):
+class GVWEnv(BaseEnv):
     '''Gymnasium environment wrapping the GVW signature-based Buchberger algorithm.'''
 
     def __init__(self, ideal_generator: IdealGenerator, mode='eval'):
-        super().__init__()
+        super().__init__(ideal_generator)
         self.ideal_generator = ideal_generator
         self.mode = mode
 
@@ -756,7 +809,16 @@ class GVWEnv(gym.Env):
 
         return index
 
-    def step(self, action: int | tuple[int, int] | tuple[tuple[int, ...], int]):
+    def step(self, action: int | tuple[int, int]) -> tuple[tuple[list[np.ndarray], list[tuple[int, int]]], int, bool, bool, dict]:
+        '''
+        Take a step in the environment based on the given action.
+
+        Parameters:
+        action: int | tuple[int, int] - The action to take (either an integer or a signature tuple).
+        
+        Returns:
+        - A tuple containing the new observation, reward, termination status, truncation status, and additional info.
+        '''
         if not self._state.get('jpairs'):
             raise ValueError('no pairs available to process')
 
