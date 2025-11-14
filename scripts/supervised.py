@@ -1,18 +1,18 @@
+import os
+
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
-import sympy
-
-import os
-import numpy as np
-from tqdm import tqdm
+import torch.optim as optim
 from implementations.utils import plot_learning_process
-from grobnerRl.envs.deepgroebner import BuchbergerEnv, BuchbergerAgent
-from grobnerRl.envs.ideals import RandomIdealGenerator, SAT3IdealGenerator
-from grobnerRl.models import Extractor, GrobnerPolicy, GrobnerCritic
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
 from grobnerRl.data import JsonDataset, collate, generate_expert_data
+from grobnerRl.envs.deepgroebner import BuchbergerAgent, BuchbergerEnv
+from grobnerRl.envs.ideals import SAT3IdealGenerator
+from grobnerRl.models import Extractor, GrobnerCritic, GrobnerPolicy
 
 
 def bc_accuracy_and_loss(model, data, labels):
@@ -20,7 +20,9 @@ def bc_accuracy_and_loss(model, data, labels):
 
     device = logits_list[0].device
     labels = labels.to(device)
-    padded_logits = torch.nn.utils.rnn.pad_sequence(logits_list, batch_first=True).to(device)
+    padded_logits = torch.nn.utils.rnn.pad_sequence(logits_list, batch_first=True).to(
+        device
+    )
 
     loss = F.cross_entropy(padded_logits, labels)
 
@@ -44,7 +46,9 @@ def value_accuracy_and_loss(model, data, returns):
     return loss, accuracy
 
 
-def train_epoch_nested(dataloader, loss_and_accuracy_fn, model, optimizer, epoch_progressbar, device):
+def train_epoch_nested(
+    dataloader, loss_and_accuracy_fn, model, optimizer, epoch_progressbar, device
+):
     """Custom training epoch that handles nested tensor batches."""
     model.train()
     epoch_losses = []
@@ -62,7 +66,9 @@ def train_epoch_nested(dataloader, loss_and_accuracy_fn, model, optimizer, epoch
         optimizer.step()
 
         epoch_losses.append(loss.item())
-        epoch_accuracies.append(accuracy.item() if torch.is_tensor(accuracy) else accuracy)
+        epoch_accuracies.append(
+            accuracy.item() if torch.is_tensor(accuracy) else accuracy
+        )
         epoch_progressbar.update(1)
         epoch_progressbar.set_postfix(loss=f"{loss.item():.4f}")
 
@@ -83,7 +89,9 @@ def validate_epoch_nested(dataloader, loss_and_accuracy_fn, model, device):
             labels = labels.to(device, non_blocking=True)
             loss, accuracy = loss_and_accuracy_fn(model, data, labels)
             epoch_losses.append(loss.item())
-            epoch_accuracies.append(accuracy.item() if torch.is_tensor(accuracy) else accuracy)
+            epoch_accuracies.append(
+                accuracy.item() if torch.is_tensor(accuracy) else accuracy
+            )
 
     avg_epoch_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0
     avg_epoch_accuracy = float(np.mean(epoch_accuracies)) if epoch_accuracies else 0.0
@@ -91,35 +99,57 @@ def validate_epoch_nested(dataloader, loss_and_accuracy_fn, model, device):
     return avg_epoch_loss, avg_epoch_accuracy
 
 
-def train_model_nested(model, train_loader, val_loader, epochs, optimizer, loss_and_accuracy_fn,
-                       device='cpu', scheduler=None, early_stopping_patience=None, early_stopping_min_delta=0.0):
+def train_model_nested(
+    model,
+    train_loader,
+    val_loader,
+    epochs,
+    optimizer,
+    loss_and_accuracy_fn,
+    device="cpu",
+    scheduler=None,
+    early_stopping_patience=None,
+    early_stopping_min_delta=0.0,
+):
     """Custom training loop that handles nested tensor batches."""
     losses_train = []
     accuracy_train = []
     losses_validation = []
     accuracy_validation = []
 
-    best_val_loss = float('inf')
+    best_val_loss = float("inf")
     patience_counter = 0
 
-    epoch_progressbar = tqdm(total=len(train_loader), desc='Training', unit='batch', leave=False)
+    epoch_progressbar = tqdm(
+        total=len(train_loader), desc="Training", unit="batch", leave=False
+    )
 
     for epoch in range(epochs):
         epoch_progressbar.reset()
-        epoch_progressbar.set_description(f'Epoch {epoch+1}/{epochs}')
+        epoch_progressbar.set_description(f"Epoch {epoch + 1}/{epochs}")
 
         # Training
-        train_loss, train_acc = train_epoch_nested(train_loader, loss_and_accuracy_fn, model,
-                                                   optimizer, epoch_progressbar, device)
+        train_loss, train_acc = train_epoch_nested(
+            train_loader,
+            loss_and_accuracy_fn,
+            model,
+            optimizer,
+            epoch_progressbar,
+            device,
+        )
         losses_train.append(train_loss)
         accuracy_train.append(train_acc)
 
         # Validation
-        val_loss, val_acc = validate_epoch_nested(val_loader, loss_and_accuracy_fn, model, device)
+        val_loss, val_acc = validate_epoch_nested(
+            val_loader, loss_and_accuracy_fn, model, device
+        )
         losses_validation.append(val_loss)
         accuracy_validation.append(val_acc)
 
-        print(f'Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}')
+        print(
+            f"Epoch {epoch + 1}/{epochs} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}"
+        )
 
         # Learning rate scheduling
         if scheduler is not None:
@@ -133,7 +163,7 @@ def train_model_nested(model, train_loader, val_loader, epochs, optimizer, loss_
             else:
                 patience_counter += 1
                 if patience_counter >= early_stopping_patience:
-                    print(f'Early stopping triggered at epoch {epoch+1}')
+                    print(f"Early stopping triggered at epoch {epoch + 1}")
                     break
 
     epoch_progressbar.close()
@@ -142,14 +172,18 @@ def train_model_nested(model, train_loader, val_loader, epochs, optimizer, loss_
 
 
 class ModelAdapter(nn.Module):
-    '''
+    """
     Adapter class to allow the models defined in grobnerRl.models to be used with BuchbergerEnv.
-    '''
+    """
 
     def __init__(self, model, device: str | torch.device | None = None):
         super(ModelAdapter, self).__init__()
         self.model = model
-        self.device = torch.device(device) if device is not None else next(model.parameters()).device
+        self.device = (
+            torch.device(device)
+            if device is not None
+            else next(model.parameters()).device
+        )
 
     def forward(self, obs):
         prepared_obs = self._prepare_observation(obs)
@@ -184,10 +218,14 @@ class ModelAdapter(nn.Module):
                 poly_tensor = poly.to(self.device)
             else:
                 poly_array = np.array(poly, dtype=np.float32)
-                poly_tensor = torch.as_tensor(poly_array, dtype=torch.float32, device=self.device)
+                poly_tensor = torch.as_tensor(
+                    poly_array, dtype=torch.float32, device=self.device
+                )
             poly_tensors.append(poly_tensor)
 
-        nested_ideal = torch.nested.nested_tensor(poly_tensors, layout=torch.jagged).to(self.device)
+        nested_ideal = torch.nested.nested_tensor(poly_tensors, layout=torch.jagged).to(
+            self.device
+        )
         selectables_list = [tuple(int(idx) for idx in pair) for pair in selectables]
 
         return ([nested_ideal], [selectables_list])
@@ -211,7 +249,7 @@ def evaluate_policy(model, actor_path, env, model_env, device, expert_agent):
 
     model_rewards, expert_rewards = [], []
 
-    for episode in tqdm(range(250), desc='Evaluating policy'):
+    for episode in tqdm(range(250), desc="Evaluating policy"):
         obs, _ = model_env.reset(seed=episode)
         episode_reward, episode_done = 0, False
 
@@ -243,7 +281,9 @@ def evaluate_policy(model, actor_path, env, model_env, device, expert_agent):
     expert_mean_reward = torch.tensor(expert_rewards).mean().item()
     performance_ratio = model_mean_reward / expert_mean_reward
 
-    print(f"Evaluation complete - Policy reward: {model_mean_reward:.4f}, Expert reward: {expert_mean_reward:.4f}, Performance ratio: {performance_ratio:.4f}")
+    print(
+        f"Evaluation complete - Policy reward: {model_mean_reward:.4f}, Expert reward: {expert_mean_reward:.4f}, Performance ratio: {performance_ratio:.4f}"
+    )
 
     return model_rewards, expert_rewards
 
@@ -256,18 +296,24 @@ if __name__ == "__main__":
     num_polys = 4
     coeff_field = 37
     length_lambda = 0.5
-    ideal_dist = f'{num_vars}-{num_clauses}_sat3'
+    ideal_dist = f"{num_vars}-{num_clauses}_sat3"
     ideal_gen = SAT3IdealGenerator(num_vars, num_clauses)
-    device = 'cpu'
-    data_path = os.path.join('data', f'{ideal_dist}.json')
-    actor_path = os.path.join('models', 'imitation_policy.pth')
-    critic_path = os.path.join('models', 'imitation_critic.pth')
+    device = "cpu"
+    data_path = os.path.join("data", f"{ideal_dist}.json")
+    actor_path = os.path.join("models", "imitation_policy.pth")
+    critic_path = os.path.join("models", "imitation_critic.pth")
 
     monoms_embedding_dim = 64
     polys_embedding_dim = 128
     ideal_depth = 4
     ideal_num_heads = 4
-    extractor_params = (num_vars + 1, monoms_embedding_dim, polys_embedding_dim, ideal_depth, ideal_num_heads)
+    extractor_params = (
+        num_vars + 1,
+        monoms_embedding_dim,
+        polys_embedding_dim,
+        ideal_depth,
+        ideal_num_heads,
+    )
     lr = 1e-4
     gamma = 0.99
 
@@ -281,8 +327,8 @@ if __name__ == "__main__":
     model.to(device)
     critic.to(device)
 
-    env = BuchbergerEnv(ideal_gen, mode='train')
-    expert_agent = BuchbergerAgent('degree_after_reduce')
+    env = BuchbergerEnv(ideal_gen, mode="train")
+    expert_agent = BuchbergerAgent("degree_after_reduce")
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model has {num_params:,} trainable parameters.")
@@ -290,33 +336,89 @@ if __name__ == "__main__":
     if not os.path.exists(data_path):
         generate_expert_data(env, dataset_size, data_path, expert_agent)
 
-    dataset = JsonDataset(data_path, 'states', 'actions')
-    critic_dataset = JsonDataset(data_path, 'states', 'values')
+    dataset = JsonDataset(data_path, "states", "actions")
+    critic_dataset = JsonDataset(data_path, "states", "values")
     split = [0.9, 0.1]
     train_dataset, val_dataset = torch.utils.data.random_split(dataset, split)
-    critic_train_dataset, critic_val_dataset = torch.utils.data.random_split(critic_dataset, split)
+    critic_train_dataset, critic_val_dataset = torch.utils.data.random_split(
+        critic_dataset, split
+    )
 
-    train_loader = DataLoader(train_dataset, batch_size, shuffle=True, collate_fn=collate, num_workers=num_workers)
-    val_loader = DataLoader(val_dataset, batch_size, collate_fn=collate, num_workers=num_workers)
-    critic_train_loader = DataLoader(critic_train_dataset, batch_size, shuffle=True, collate_fn=collate, num_workers=num_workers)
-    critic_val_loader = DataLoader(critic_val_dataset, batch_size, collate_fn=collate, num_workers=num_workers)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size,
+        shuffle=True,
+        collate_fn=collate,
+        num_workers=num_workers,
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size, collate_fn=collate, num_workers=num_workers
+    )
+    critic_train_loader = DataLoader(
+        critic_train_dataset,
+        batch_size,
+        shuffle=True,
+        collate_fn=collate,
+        num_workers=num_workers,
+    )
+    critic_val_loader = DataLoader(
+        critic_val_dataset, batch_size, collate_fn=collate, num_workers=num_workers
+    )
 
     optimizer = optim.Adam(model.parameters(), lr)
     critic_optimizer = optim.Adam(critic.parameters(), lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
-    critic_scheduler = optim.lr_scheduler.ReduceLROnPlateau(critic_optimizer, patience=5, factor=0.5)
+    critic_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        critic_optimizer, patience=5, factor=0.5
+    )
 
-    model, losses_train, accuracy_train, losses_validation, accuracy_validation = train_model_nested(model, train_loader, val_loader, epochs, optimizer, bc_accuracy_and_loss, device=device, scheduler=scheduler, early_stopping_patience=50, early_stopping_min_delta=0.001)
-    plot_learning_process(losses_train, losses_validation, accuracy_train, accuracy_validation)
+    model, losses_train, accuracy_train, losses_validation, accuracy_validation = (
+        train_model_nested(
+            model,
+            train_loader,
+            val_loader,
+            epochs,
+            optimizer,
+            bc_accuracy_and_loss,
+            device=device,
+            scheduler=scheduler,
+            early_stopping_patience=50,
+            early_stopping_min_delta=0.001,
+        )
+    )
+    plot_learning_process(
+        losses_train, losses_validation, accuracy_train, accuracy_validation
+    )
     os.makedirs(os.path.dirname(actor_path), exist_ok=True)
     torch.save(model.state_dict(), actor_path)
 
     env = BuchbergerEnv(ideal_gen)
-    expert_agent = BuchbergerAgent('degree_after_reduce')    
-    model_env = BuchbergerEnv(ideal_gen, mode='train')
-    model_rewards, expert_rewards = evaluate_policy(model, actor_path, env, model_env, device, expert_agent)
+    expert_agent = BuchbergerAgent("degree_after_reduce")
+    model_env = BuchbergerEnv(ideal_gen, mode="train")
+    model_rewards, expert_rewards = evaluate_policy(
+        model, actor_path, env, model_env, device, expert_agent
+    )
 
-    critic_model, losses_train, accuracy_train, losses_validation, accuracy_validation = train_model_nested(critic, critic_train_loader, critic_val_loader, epochs, critic_optimizer, value_accuracy_and_loss, device=device, scheduler=critic_scheduler, early_stopping_patience=50, early_stopping_min_delta=0.001)
-    plot_learning_process(losses_train, losses_validation, accuracy_train, accuracy_validation)
+    (
+        critic_model,
+        losses_train,
+        accuracy_train,
+        losses_validation,
+        accuracy_validation,
+    ) = train_model_nested(
+        critic,
+        critic_train_loader,
+        critic_val_loader,
+        epochs,
+        critic_optimizer,
+        value_accuracy_and_loss,
+        device=device,
+        scheduler=critic_scheduler,
+        early_stopping_patience=50,
+        early_stopping_min_delta=0.001,
+    )
+    plot_learning_process(
+        losses_train, losses_validation, accuracy_train, accuracy_validation
+    )
     os.makedirs(os.path.dirname(critic_path), exist_ok=True)
     torch.save(critic_model.state_dict(), critic_path)

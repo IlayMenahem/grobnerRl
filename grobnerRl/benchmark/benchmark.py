@@ -1,10 +1,19 @@
+import copy
+import itertools
+import multiprocessing
 import os
-import numpy as np
-import matplotlib.pyplot as plt
 from typing import Optional
 
+import matplotlib.pyplot as plt
+import numpy as np
 
-def benchmark_agent(agent, num_episodes: int, env, folder='figs', agent_name: Optional[str] = None) -> None:
+from grobnerRl.envs.env import BaseEnv
+from grobnerRl.experts import Expert
+
+
+def benchmark_agent(
+    agent, num_episodes: int, env, folder="figs", agent_name: Optional[str] = None
+) -> None:
     """
     Benchmarks a given agent for Buchberger's algorithm over multiple episodes.
 
@@ -38,7 +47,52 @@ def benchmark_agent(agent, num_episodes: int, env, folder='figs', agent_name: Op
     plot_pdf(reward_counts, file_name)
 
 
-def compare_agents(strategy1, strategy2, num_episodes: int, *ideal_params: list) -> None:
+def _simulate_episode(env: BaseEnv, expert: Expert) -> int:
+    obs, _ = env.reset()
+
+    _, pairs = obs
+    if not pairs:
+        return 0
+
+    reward_total = 0
+    terminated, truncated = False, False
+
+    while not (terminated or truncated):
+        action = expert(obs)
+        obs, reward, terminated, truncated, _ = env.step(action)
+        reward_total += reward
+
+    return reward_total
+
+
+def benchmark_expert(
+    expert: Expert, num_episodes: int, env: BaseEnv, folder="figs"
+) -> None:
+    """
+    Benchmarks a given expert for Buchberger's algorithm over multiple episodes.
+
+    Args:
+    - expert (Expert): An expert object.
+    - num_episodes (int): The number of episodes to simulate.
+    - env (BaseEnv): The environment to use for the simulation.
+    - folder (str): The folder where the plot will be saved. Default is 'figs'.
+    """
+    with multiprocessing.Pool() as pool:
+        # deepcopy the env to ensure each process has a fresh copy
+        envs = (copy.deepcopy(env) for _ in range(num_episodes))
+        experts = itertools.repeat(expert, num_episodes)
+        reward_counts = pool.starmap(
+            _simulate_episode,
+            zip(envs, experts),
+        )
+
+    file_name = os.path.join(folder, expert.__class__.__name__)
+    plot_pdf(reward_counts, file_name)
+
+
+def compare_agents(
+    strategy1, strategy2, num_episodes: int, *ideal_params: list
+) -> None:
     """
     Compares two strategies for Buchberger's algorithm over multiple episodes.
 
@@ -58,7 +112,7 @@ def compare_agents(strategy1, strategy2, num_episodes: int, *ideal_params: list)
     for _ in range(num_episodes):
         raise NotImplementedError("This function needs to be implemented.")
 
-    plot_pdf(step_diffs, f'{strategy1}_vs_{strategy2}')
+    plot_pdf(step_diffs, f"{strategy1}_vs_{strategy2}")
 
 
 def display_obs(obs: tuple[list, list]) -> None:
@@ -96,12 +150,9 @@ def plot_pdf(step_counts: list, strategy_name: str) -> None:
     var: float = np.var(step_counts)
     mean: float = np.mean(step_counts)
     plt.hist(step_counts, bins=100, density=True)
-    plt.title(f'Variance: {var:.2f}, Mean: {mean:.2f}')
-    plt.xlabel('Number of Steps')
-    plt.ylabel('Probability Density')
+    plt.title(f"Variance: {var:.2f}, Mean: {mean:.2f}")
+    plt.xlabel("Number of Steps")
+    plt.ylabel("Probability Density")
     plt.grid()
-    plt.savefig(f'{strategy_name}.png')
+    plt.savefig(f"{strategy_name}.png")
     plt.close()
-
-
-

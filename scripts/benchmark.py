@@ -2,23 +2,20 @@
 Benchmark script for comparing MCTS agent with standard selection strategies.
 """
 
-from grobnerRl.envs.deepgroebner import BuchbergerEnv, MCTSAgent, BuchbergerAgent, OracleAgent
+from grobnerRl.benchmark.benchmark import benchmark_expert
+from grobnerRl.envs.env import BuchbergerEnv
 from grobnerRl.envs.ideals import SAT3IdealGenerator
-from grobnerRl.benchmark.benchmark import benchmark_agent
+from grobnerRl.experts import BasicExpert
 
-if __name__ == '__main__':
-    ideal_dist = SAT3IdealGenerator(3, 10)
-    num_episodes = 250
+if __name__ == "__main__":
+    num_vars = 10
+    multiplier = 4.7
+    num_clauses = int(num_vars * multiplier)
 
-    env = BuchbergerEnv(ideal_dist, mode='eval')
+    ideal_dist = SAT3IdealGenerator(num_vars, num_clauses)
+    num_episodes = 1000
 
-    buchbergerAgent = BuchbergerAgent('normal')
-    benchmark_agent(buchbergerAgent, num_episodes, env, folder='figs', agent_name='BuchbergerAgent')
+    env = BuchbergerEnv(ideal_dist)
 
-    MCTSagent = MCTSAgent(env, n_simulations=50, c=1, gamma=0.99, rollout_policy='normal')
-    benchmark_agent(MCTSagent, num_episodes, env, folder='figs', agent_name='MCTSAgent')
-
-    oracleAgent = OracleAgent(env)
-    benchmark_agent(oracleAgent, num_episodes, env, folder='figs', agent_name='OracleAgent')
-
-    env.close()
+    buchbergerAgent = BasicExpert(env, strategy="normal")
+    benchmark_expert(buchbergerAgent, num_episodes, env, folder="figs")
