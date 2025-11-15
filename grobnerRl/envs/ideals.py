@@ -1,18 +1,21 @@
 """Generators of ideals."""
 
 import itertools as it
-import numpy as np
-import sympy as sp
 import random
-import sympy
 from math import prod
 
+import numpy as np
+import sympy
+import sympy as sp
 
-def cyclic(n, coefficient_ring=sp.FF(32003), order='grevlex'):
+
+def cyclic(n, coefficient_ring=sp.FF(32003), order="grevlex"):
     """Return the cyclic-n ideal."""
-    R, gens = sp.xring('x:' + str(n), coefficient_ring, order)
-    F = [sum(np.prod([gens[(i+k) % n] for k in range(d)]) for i in range(n))
-         for d in range(1, n)]
+    R, gens = sp.xring("x:" + str(n), coefficient_ring, order)
+    F = [
+        sum(np.prod([gens[(i + k) % n] for k in range(d)]) for i in range(n))
+        for d in range(1, n)
+    ]
     return F + [np.product(gens) - 1]
 
 
@@ -43,7 +46,7 @@ def basis(ring, d):
         return [np.prod(c) for c in it.combinations_with_replacement(ring.gens, d)]
 
 
-def degree_distribution(ring, d, dist='uniform', constants=False):
+def degree_distribution(ring, d, dist="uniform", constants=False):
     """Return the probability distribution on degrees.
 
     Parameters
@@ -77,15 +80,15 @@ def degree_distribution(ring, d, dist='uniform', constants=False):
 
     """
     head = [1] if constants else [0]
-    if dist == 'uniform':
+    if dist == "uniform":
         n = len(ring.gens)
         tail = [int(sp.binomial(n + i - 1, n - 1)) for i in range(1, d + 1)]
-    elif dist == 'weighted':
+    elif dist == "weighted":
         tail = d * [1]
-    elif dist == 'maximum':
+    elif dist == "maximum":
         tail = (d - 1) * [0] + [1]
     else:
-        raise ValueError('unrecognized dist option')
+        raise ValueError("unrecognized dist option")
     count = np.array(head + tail)
     return count / np.sum(count)
 
@@ -114,30 +117,30 @@ class IdealGenerator:
 
 def parse_ideal_dist(ideal_dist):
     """Return concrete IdealGenerator instance given by string ideal_dist."""
-    dist_args = ideal_dist.split('-')
-    if dist_args[0] == 'cyclic':
+    dist_args = ideal_dist.split("-")
+    if dist_args[0] == "cyclic":
         n = int(dist_args[1])
         return FixedIdealGenerator(cyclic(n))
-    elif dist_args[3] in ['uniform', 'weighted', 'maximum']:
+    elif dist_args[3] in ["uniform", "weighted", "maximum"]:
         kwargs = {
-            'n': int(dist_args[0]),
-            'd': int(dist_args[1]),
-            's': int(dist_args[2]),
-            'dist': dist_args[3],
-            'constants': 'consts' in dist_args,
-            'homogeneous': 'homog' in dist_args,
-            'pure': 'pure' in dist_args,
+            "n": int(dist_args[0]),
+            "d": int(dist_args[1]),
+            "s": int(dist_args[2]),
+            "dist": dist_args[3],
+            "constants": "consts" in dist_args,
+            "homogeneous": "homog" in dist_args,
+            "pure": "pure" in dist_args,
         }
         return RandomBinomialIdealGenerator(**kwargs)
     else:
         kwargs = {
-            'n': int(dist_args[0]),
-            'd': int(dist_args[1]),
-            's': int(dist_args[2]),
-            'lam': float(dist_args[3]),
-            'dist': dist_args[4],
-            'constants': 'consts' in dist_args,
-            'homogeneous': 'homog' in dist_args,
+            "n": int(dist_args[0]),
+            "d": int(dist_args[1]),
+            "s": int(dist_args[2]),
+            "lam": float(dist_args[3]),
+            "dist": dist_args[4],
+            "constants": "consts" in dist_args,
+            "homogeneous": "homog" in dist_args,
         }
         return RandomIdealGenerator(**kwargs)
 
@@ -206,10 +209,19 @@ class RandomBinomialIdealGenerator(IdealGenerator):
 
     """
 
-    def __init__(self, n=3, d=20, s=10, dist='uniform',
-                 constants=False, homogeneous=False, pure=False,
-                 coefficient_ring=sp.FF(32003), order='grevlex'):
-        ring = sp.xring('x:' + str(n), coefficient_ring, order)[0]
+    def __init__(
+        self,
+        n=3,
+        d=20,
+        s=10,
+        dist="uniform",
+        constants=False,
+        homogeneous=False,
+        pure=False,
+        coefficient_ring=sp.FF(32003),
+        order="grevlex",
+    ):
+        ring = sp.xring("x:" + str(n), coefficient_ring, order)[0]
         self.s = s
         self.homogeneous = homogeneous
         self.pure = pure
@@ -223,14 +235,15 @@ class RandomBinomialIdealGenerator(IdealGenerator):
         """Return a new random binomial ideal from the ring."""
         F = []
         for _ in range(self.s):
-
             c = -1 if self.pure else self.rng.integers(1, self.P)
 
             if self.homogeneous:
                 d = self.rng.choice(len(self.degree_dist), p=self.degree_dist)
                 d1, d2 = d, d
             else:
-                d1, d2 = self.rng.choice(len(self.degree_dist), size=2, p=self.degree_dist)
+                d1, d2 = self.rng.choice(
+                    len(self.degree_dist), size=2, p=self.degree_dist
+                )
 
             for _ in range(1000):
                 m1 = self.rng.choice(self.bases[d1])
@@ -245,7 +258,9 @@ class RandomBinomialIdealGenerator(IdealGenerator):
                     F.append(m2 + c * m1)
                     break
             else:
-                raise RuntimeError('failed to generate two distinct random monomials after 1000 trials')
+                raise RuntimeError(
+                    "failed to generate two distinct random monomials after 1000 trials"
+                )
 
         return F
 
@@ -295,9 +310,19 @@ class RandomIdealGenerator(IdealGenerator):
 
     """
 
-    def __init__(self, n=3, d=20, s=10, lam=0.5, dist='uniform', constants=False, homogeneous=False,
-                 coefficient_ring=sp.FF(32003), order='grevlex'):
-        ring = sp.xring('x:' + str(n), coefficient_ring, order)[0]
+    def __init__(
+        self,
+        n=3,
+        d=20,
+        s=10,
+        lam=0.5,
+        dist="uniform",
+        constants=False,
+        homogeneous=False,
+        coefficient_ring=sp.FF(32003),
+        order="grevlex",
+    ):
+        ring = sp.xring("x:" + str(n), coefficient_ring, order)[0]
         self.s = s
         self.lam = lam
         self.homogeneous = homogeneous
@@ -324,6 +349,7 @@ class RandomIdealGenerator(IdealGenerator):
 
     def seed(self, seed=None):
         self.rng = np.random.default_rng(seed)
+
 
 def random_polynomial(max_num_monoms, max_degree, vars, ring):
     num_monoms = random.randint(1, max_num_monoms)
@@ -356,15 +382,18 @@ def random_polynomial(max_num_monoms, max_degree, vars, ring):
 
     return ring.from_dict(poly_dict)
 
+
 def random_ideal(num_polys, max_num_monoms, max_degree, num_vars, field, order):
-    R, vars = sympy.xring([f'x{i}' for i in range(num_vars)], field, order)
-    ideal = [random_polynomial(max_num_monoms, max_degree, vars, R) for _ in range(num_polys)]
+    R, vars = sympy.xring([f"x{i}" for i in range(num_vars)], field, order)
+    ideal = [
+        random_polynomial(max_num_monoms, max_degree, vars, R) for _ in range(num_polys)
+    ]
 
     return ideal
 
 
 class SAT3IdealGenerator(IdealGenerator):
-    '''
+    """
     Generator of ideals corresponding to random 3-SAT instances.
 
     Parameters
@@ -373,23 +402,27 @@ class SAT3IdealGenerator(IdealGenerator):
         Number of boolean variables in the 3-SAT instance.
     num_clauses : int
         Number of clauses in the 3-SAT instance.
-    '''
+    """
 
     def __init__(self, num_vars, num_clauses):
         self.num_vars = num_vars
         self.num_clauses = num_clauses
-    
+
     def __next__(self):
-        R, vars = sympy.xring([f'x{i}' for i in range(self.num_vars)], sp.FF(2), 'lex')
-        var_polys = [vars[i]*(1 - vars[i]) for i in range(self.num_vars)]
+        R, vars = sympy.xring([f"x{i}" for i in range(self.num_vars)], sp.FF(2), "lex")
+        var_polys = [vars[i] * (1 - vars[i]) for i in range(self.num_vars)]
 
         clauses_polys = []
         for _ in range(self.num_clauses):
             clause_vars = random.sample(vars, 3)
-            negations = random.choices([0, 1], k=3)  # 0 means negated, 1 means not negated
+            negations = random.choices(
+                [0, 1], k=3
+            )  # 0 means negated, 1 means not negated
 
             # build the polynomial for the clause
             clause_poly = prod((neg - var) for var, neg in zip(clause_vars, negations))
             clauses_polys.append(clause_poly)
 
-        return var_polys + clauses_polys
+        ideal = var_polys + clauses_polys
+
+        return ideal
