@@ -720,13 +720,12 @@ def test_buchberger_from_buchberger(F, G):
 @pytest.mark.parametrize("F, G", BUCHBERGER_ENV_IDEAL_CASES)
 def test_buchberger_env_from_buchberger(F, G):
     env = BuchbergerEnv(DummyIdealGenerator([F]), mode="eval")
-    env.reset()
+    (_, pairs), _ = env.reset()
 
     step_count = 0
     max_steps = 7
-    while env.pairs and step_count < max_steps:
-        pair = env.pairs.pop(0)
-        env.step(pair)
+    while pairs and step_count < max_steps:
+        env.step(pairs[0])
         step_count += 1
 
     assert not env.pairs
