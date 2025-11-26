@@ -83,6 +83,15 @@ class Expert(ABC):
         """
         pass
 
+    def update_env(self, new_env: BaseEnv):
+        """
+        Update the expert's environment.
+
+        Args:
+        - new_env (BaseEnv): The new environment to set.
+        """
+        self.env = new_env
+
 
 def next_step(
     env: BaseEnv, pair: int | tuple[int, int]
@@ -297,6 +306,17 @@ class LeastRemainingPairsExpert(Expert):
 
 
 class ClosestLMExpert(BasisBasedExpert):
+    def update_env(self, new_env: BaseEnv):
+        """
+        Update the expert's environment.
+
+        Args:
+        - new_env (BaseEnv): The new environment to set.
+        """
+        self.env = new_env
+        self.basis = get_basis(new_env.generators)
+        self.leading_terms = get_leading_terms(self.basis)
+
     def __call__(
         self, observation: tuple[list[PolyElement], list[tuple[int, int]]]
     ) -> int | tuple[int, int]:
@@ -309,16 +329,6 @@ class ClosestLMExpert(BasisBasedExpert):
 
         def distance(m1: tuple[int, ...], m2: tuple[int, ...]) -> int:
             return sum(abs(a - b) for a, b in zip(m1, m2))
-
-        def monomial_to_tuple(monomial: PolyElement) -> tuple[int, ...]:
-            monomial_monoms = monomial.monoms()
-
-            return tuple(monomial_monoms)
-
-        # check if there is a need to recompute the basis
-        if self.need_to_recompute_basis():
-            self.basis = get_basis(self.env.generators)
-            self.leading_terms = get_leading_terms(self.basis)
 
         G, P = observation
         leading_monomial_by_pair = lm_by_pair(self.env, G, P)
