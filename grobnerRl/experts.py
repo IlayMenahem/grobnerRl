@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from copy import deepcopy
+from copy import copy
 
 import numpy as np
 from sympy.polys.rings import PolyElement
@@ -84,7 +84,9 @@ class Expert(ABC):
         pass
 
 
-def next_step(env: BaseEnv, pair: int | tuple[int, int]):
+def next_step(
+    env: BaseEnv, pair: int | tuple[int, int]
+) -> tuple[list[PolyElement], list[tuple[int, int]], BaseEnv]:
     """
     Compute the next step in the Buchberger process using the specified pair.
 
@@ -97,13 +99,13 @@ def next_step(env: BaseEnv, pair: int | tuple[int, int]):
     """
 
     # copy the environment to avoid modifying the original one
-    new_env = deepcopy(env)
+    new_env = copy(env)
+    new_env.generators = list(env.generators)
+    new_env.pairs = list(env.pairs)
 
-    new_env.step(pair)
-    G = new_env.generators
-    P = new_env.pairs
+    (basis, pairs), _, _, _, _ = new_env.step(pair)
 
-    return G, P, new_env
+    return basis, pairs, new_env
 
 
 def get_basis(G: list[PolyElement]) -> list[PolyElement]:
@@ -133,12 +135,11 @@ def lm_by_pair(
 
     for pair in pairs:
         G_tag, _, _ = next_step(env, pair)
-        new_polys = {poly for poly in G_tag if poly not in G}
+        new_polys = [poly for poly in G_tag if poly not in G]
 
         if len(new_polys) > 1:
             raise ValueError("multiple new polynomials found")
-
-        if len(new_polys) == 1:
+        elif len(new_polys) == 1:
             new_poly = new_polys.pop()
             leading_monomial_by_pair[pair] = new_poly.LM
 
@@ -323,14 +324,14 @@ class ClosestLMExpert(BasisBasedExpert):
         leading_monomial_by_pair = lm_by_pair(self.env, G, P)
         best_pair = min(
             leading_monomial_by_pair.keys(),
-            key=lambda p: min(
-                distance(monomial_to_tuple(leading_monomial_by_pair[p]), lt)
+            key=lambda pair: min(
+                distance(leading_monomial_by_pair[pair], lt)
                 for lt in self.leading_terms
             ),
             default=P[0],
         )
 
-        raise NotImplementedError()
+        return best_pair
 
 
 class MCTSExpert(Expert):

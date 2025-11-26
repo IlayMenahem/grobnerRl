@@ -9,12 +9,13 @@ from copy import deepcopy
 from typing import Any, Callable
 
 import numpy as np
+from numpy.typing import ArrayLike
 from sympy.polys.rings import PolyElement
 
 from grobnerRl.envs.ideals import IdealGenerator
 
 
-def tokenize(ideal: Sequence[PolyElement]) -> list[np.ndarray]:
+def tokenize(ideal: Sequence[PolyElement]) -> list[ArrayLike]:
     """
     takes an ideal and returns a tokenized version of it, a list of arrays, each of the arrays
     representing a polynomial monomials
@@ -24,30 +25,22 @@ def tokenize(ideal: Sequence[PolyElement]) -> list[np.ndarray]:
 
     Returns: tokenized ideal
     """
-    try:
-        polys_monomials = [
-            np.concat(
-                (
-                    np.array(list(map(int, poly.coeffs()))).reshape((1, -1)).T,
-                    np.array(poly.monoms()),
-                ),
-                axis=1,
-            )
-            for poly in ideal
-        ]
-    except ValueError as e:
-        print("Error tokenizing ideal:")
-        for poly in ideal:
-            print(
-                f"Polynomial: {poly}, Coeffs: {poly.coeffs()}, Monoms: {poly.monoms()}"
-            )
-
-        raise e
+    polys_monomials = [
+        np.concat(
+            (
+                np.array(list(map(int, poly.coeffs()))).reshape((1, -1)).T,
+                np.array(poly.monoms()),
+            ),
+            axis=1,
+        )
+        for poly in ideal
+        if poly != 0
+    ]
 
     return polys_monomials
 
 
-def make_obs(G, P) -> tuple[list[np.ndarray], list[tuple[int, int]]]:
+def make_obs(G, P) -> tuple[list[ArrayLike], list[tuple[int, int]]]:
     P = deepcopy(P)
     G = tokenize(G)
 
@@ -712,7 +705,7 @@ class BaseEnv(ABC):
     @abstractmethod
     def reset(
         self, seed=None, options=None
-    ) -> tuple[tuple[list[np.ndarray], list[tuple[int, int]]], dict]:
+    ) -> tuple[tuple[list[ArrayLike] | list[PolyElement], list[tuple[int, int]]], dict]:
         """
         Reset the environment to start a new episode.
 
@@ -729,7 +722,13 @@ class BaseEnv(ABC):
     @abstractmethod
     def step(
         self, action: int | tuple[int, int]
-    ) -> tuple[tuple[list[np.ndarray], list[tuple[int, int]]], int, bool, bool, dict]:
+    ) -> tuple[
+        tuple[list[ArrayLike] | list[PolyElement], list[tuple[int, int]]],
+        int,
+        bool,
+        bool,
+        dict,
+    ]:
         """
         Take a step in the environment based on the given action.
 
@@ -767,7 +766,7 @@ class BuchbergerEnv(BaseEnv):
 
     def reset(
         self, seed=None, options=None
-    ) -> tuple[tuple[list[np.ndarray], list[tuple[int, int]]], dict]:
+    ) -> tuple[tuple[list[ArrayLike] | list[PolyElement], list[tuple[int, int]]], dict]:
         """
         Reset the environment to start a new episode.
 
@@ -792,7 +791,13 @@ class BuchbergerEnv(BaseEnv):
 
     def step(
         self, action: int | tuple[int, int]
-    ) -> tuple[tuple[list[np.ndarray], list[tuple[int, int]]], int, bool, bool, dict]:
+    ) -> tuple[
+        tuple[list[ArrayLike] | list[PolyElement], list[tuple[int, int]]],
+        int,
+        bool,
+        bool,
+        dict,
+    ]:
         """
         Take a step in the environment based on the given action.
 
@@ -846,7 +851,9 @@ class GVWEnv(BaseEnv):
         self.generators: list[PolyElement] = []
         self.pairs: list[tuple[tuple[int, ...], int]] = []
 
-    def _current_observation(self):
+    def _current_observation(
+        self,
+    ) -> tuple[list[PolyElement] | list[ArrayLike], list[tuple[int, int]]]:
         observation = (self.generators, self.pairs)
         if self.mode == "train":
             observation = make_obs(*observation)
@@ -895,7 +902,13 @@ class GVWEnv(BaseEnv):
 
     def step(
         self, action: int | tuple[int, int]
-    ) -> tuple[tuple[list[np.ndarray], list[tuple[int, int]]], int, bool, bool, dict]:
+    ) -> tuple[
+        tuple[list[ArrayLike] | list[PolyElement], list[tuple[int, int]]],
+        int,
+        bool,
+        bool,
+        dict,
+    ]:
         """
         Take a step in the environment based on the given action.
 

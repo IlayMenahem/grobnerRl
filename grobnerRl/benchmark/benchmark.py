@@ -49,6 +49,7 @@ def benchmark_agent(
 
 def _simulate_episode(env: BaseEnv, expert: Expert) -> int:
     obs, _ = env.reset()
+    expert.env = env
 
     _, pairs = obs
     if not pairs:
