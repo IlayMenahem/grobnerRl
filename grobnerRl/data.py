@@ -7,18 +7,13 @@ from itertools import accumulate
 import numpy as np
 import torch
 from grain.sources import RandomAccessDataSource
-from jaxtyping import ArrayLike
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
 from grobnerRl.envs.env import BaseEnv, BuchbergerEnv, tokenize
 from grobnerRl.envs.ideals import SAT3IdealGenerator
 from grobnerRl.experts import BasicExpert, ClosestLMExpert, Expert
-
-Ideal = list[np.ndarray] | list[ArrayLike]
-SelectablePairs = list[tuple[int, int]]
-Observation = tuple[Ideal, SelectablePairs]
-Action = int
+from grobnerRl.types import Action, Observation
 
 
 class JsonDatasource(RandomAccessDataSource[tuple[Observation, Action]]):
