@@ -7,6 +7,7 @@ from math import prod
 import numpy as np
 import sympy
 import sympy as sp
+from sympy.polys.rings import PolyElement
 
 
 def cyclic(n, coefficient_ring=sp.FF(32003), order="grevlex"):
@@ -408,7 +409,7 @@ class SAT3IdealGenerator(IdealGenerator):
         self.num_vars = num_vars
         self.num_clauses = num_clauses
 
-    def __next__(self):
+    def __next__(self) -> list[PolyElement]:
         R, vars = sympy.xring([f"x{i}" for i in range(self.num_vars)], sp.FF(2), "lex")
         var_polys = [vars[i] * (1 - vars[i]) for i in range(self.num_vars)]
 

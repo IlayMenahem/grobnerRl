@@ -4,7 +4,7 @@ from copy import copy
 import numpy as np
 from sympy.polys.rings import PolyElement
 
-from grobnerRl.envs.env import BaseEnv, GVW_buchberger, reduce
+from grobnerRl.envs.env import BaseEnv, GVW_buchberger, reduce, spoly
 
 
 def select(
@@ -143,14 +143,11 @@ def lm_by_pair(
     leading_monomial_by_pair = {}
 
     for pair in pairs:
-        G_tag, _, _ = next_step(env, pair)
-        new_polys = [poly for poly in G_tag if poly not in G]
+        poly = spoly(G[pair[0]], G[pair[1]])
+        remainder, _ = reduce(poly, G)
 
-        if len(new_polys) > 1:
-            raise ValueError("multiple new polynomials found")
-        elif len(new_polys) == 1:
-            new_poly = new_polys.pop()
-            leading_monomial_by_pair[pair] = new_poly.LM
+        if remainder != 0:
+            leading_monomial_by_pair[pair] = remainder.LM
 
     return leading_monomial_by_pair
 

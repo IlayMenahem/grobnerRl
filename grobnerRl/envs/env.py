@@ -778,6 +778,8 @@ class BuchbergerEnv(BaseEnv):
         observation: The initial observation for the environment.
         info: Additional information about the environment state.
         """
+        self.generators = []
+        self.pairs = []
         generators = next(self.ideal_generator)
 
         for g in generators:
