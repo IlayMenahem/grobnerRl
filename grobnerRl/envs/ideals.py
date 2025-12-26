@@ -427,3 +427,27 @@ class SAT3IdealGenerator(IdealGenerator):
         ideal = var_polys + clauses_polys
 
         return ideal
+
+
+class GraphKColoringIdealGenerator(IdealGenerator):
+    """
+    Generator of ideals corresponding to graph k-coloring problems.
+    the graph is colorable with k colors if and only if the Gröebner basis isn't {1}.
+
+    Parameters
+    ----------
+    num_vertices : int
+        Number of vertices in the graph.
+    edges : list of tuple of int
+        List of edges in the graph, where each edge is represented as a tuple
+        of vertex indices.
+    k : int
+        Number of colors.
+    """
+
+    def __init__(self, num_vertices, edges, k):
+        self.num_vertices = num_vertices
+        self.k = k
+
+    def __next__(self):
+        raise NotImplementedError("This generator is not yet implemented.")
