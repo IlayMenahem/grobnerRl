@@ -3,6 +3,7 @@ import os
 from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import accumulate
+from typing import SupportsIndex
 
 import numpy as np
 import torch
@@ -27,7 +28,7 @@ class JsonDatasource(RandomAccessDataSource[tuple[Observation, Action]]):
     def __len__(self):
         return len(self.states)
 
-    def __getitem__(self, idx: int) -> tuple[Observation, Action]:
+    def __getitem__(self, idx: SupportsIndex) -> tuple[Observation, Action]:
         state = self.states[idx]
         action = self.actions[idx]
 
