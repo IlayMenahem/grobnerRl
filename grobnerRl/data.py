@@ -110,7 +110,7 @@ def generate_expert_data(env: BaseEnv, size, path, expert_agent: Expert, gamma=0
                 i, j = expert_action
                 flat_action = i * len(obs[0]) + j
 
-                states.append((tokenize(obs[0]), obs[1]))
+                states.append((tokenize(obs[0]), list(obs[1])))
                 actions.append(flat_action)
                 pbar.update(1)
 
