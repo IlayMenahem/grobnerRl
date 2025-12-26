@@ -1,191 +1,305 @@
-import torch
-from torch import nn
-import numpy as np
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+from equinox import Module
+from jaxtyping import Array
+
+from grobnerRl.types import Observation
 
 
-class DeepSetsEncoder(nn.Module):
-    """
-    A permutation-invariant encoder for sets implemented in PyTorch.
+class MonomialEmbedder(Module):
+    linear: eqx.nn.Linear
 
-    Given input X of shape (n, d), this module outputs a vector of shape (d',).
-    Internally it applies phi to each row, sums across the set dimension,
-    then applies rho to the aggregated representation.
-    """
-    phi: nn.Module
-    rho: nn.Module
+    def __init__(self, monomial_dim: int, embedding_dim: int, key: Array):
+        self.linear = eqx.nn.Linear(monomial_dim, embedding_dim, key=key)
 
-    def __init__(self, input_dim: int, phi_hidden: int, rho_hidden: int, output_dim: int):
-        super(DeepSetsEncoder, self).__init__()
-        # phi: elementwise feature extractor
-        self.phi = nn.Sequential(
-            nn.Linear(input_dim, phi_hidden),
-            nn.ReLU(),
-            nn.Linear(phi_hidden, phi_hidden),
-            nn.ReLU(),
-            nn.Linear(phi_hidden, phi_hidden)
-        )
-        # rho: post-aggregation processor
-        self.rho = nn.Sequential(
-            nn.Linear(phi_hidden, rho_hidden),
-            nn.ReLU(),
-            nn.Linear(rho_hidden, rho_hidden),
-            nn.ReLU(),
-            nn.Linear(rho_hidden, output_dim)
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def __call__(self, monomials: Array) -> Array:
         """
-        x: Nested tensor with jagged layout or regular tensor
-        returns: Tensor of shape (d',) or (batch_size, d',)
-        """
-        components = x.unbind()
-        processed = []
-
-        for comp in components:
-            h = self.phi(comp)
-            h_sum = h.sum(dim=0)
-            processed.append(h_sum)
-
-        stacked = torch.stack(processed)
-        res = self.rho(stacked)
-
-        return res
-
-
-def apply_mask(vals: torch.Tensor, selectables: list[tuple[int,int]]) -> torch.Tensor:
-    mask = torch.full_like(vals, float('-inf'))
-
-    if selectables:
-        rows, cols = zip(*selectables)
-        mask[rows, cols] = 0.0
-
-    vals = vals + mask
-    vals = vals.flatten()
-
-    return vals
-
-
-class Extractor(nn.Module):
-    polynomial_embedder: DeepSetsEncoder
-    ideal_transformer: nn.Module
-
-    def __init__(self, num_vars: int, monoms_embedding_dim: int, polys_embedding_dim: int, ideal_depth: int, ideal_num_heads: int):
-
-        super(Extractor, self).__init__()
-
-        self.polynomial_embedder = DeepSetsEncoder(num_vars, monoms_embedding_dim, polys_embedding_dim, polys_embedding_dim)
-        self.ideal_transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(polys_embedding_dim, ideal_num_heads, dim_feedforward=4*polys_embedding_dim, dropout=0.1, batch_first=True),
-            num_layers=ideal_depth
-        )
-
-    def forward(self, obs: tuple|list) -> torch.Tensor:
-        """
-        Forward pass that handles batched nested tensors.
-
         Args:
-            obs: tuple of (nested_batch, selectables_batch) where:
-                - nested_batch: list of nested tensors (one per batch item)
-                - selectables_batch: list of selectables for each batch item
+        - monomials: Array of shape (num_monomials, monomial_dim)
 
         Returns:
-            List of tensors (for batched input) or single tensor
+        - Array of shape (num_monomials, embedding_dim)
         """
-        def process_single(nested_ideal, selectables):
-            polynomial_encodings = self.polynomial_embedder(nested_ideal)
-            ideal_embeddings = self.ideal_transformer(polynomial_encodings.unsqueeze(0)).squeeze(0)
-            values = torch.matmul(ideal_embeddings, ideal_embeddings.T)
-            vals = apply_mask(values, selectables)
+        x = jax.vmap(self.linear)(monomials)
+        x = jax.nn.relu(x)
 
-            return vals
-
-        nested_batch, selectables_batch = obs
-
-        if isinstance(nested_batch, list):
-            batch_outputs = []
-
-            for nested_ideal, selectables in zip(nested_batch, selectables_batch):
-                vals = process_single(nested_ideal, selectables)
-                batch_outputs.append(vals)
-
-            return batch_outputs
-        else:
-            vals = process_single(nested_batch, selectables_batch)
-
-            return vals
+        return x
 
 
-class GrobnerPolicy(nn.Module):
-    extractor: nn.Module
+class PolynomialEmbedder(Module):
+    """
+    Polynomial embedder using DeepSets architecture in Equinox.
+    """
 
-    def __init__(self, extractor: nn.Module):
-        super(GrobnerPolicy, self).__init__()
+    phi_layers: list[eqx.nn.Linear]
+    rho_layers: list[eqx.nn.Linear]
 
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        hidden_layers: int,
+        output_dim: int,
+        key: Array,
+    ):
+        keys = jax.random.split(key, hidden_layers * 2 + 2)
+        self.phi_layers = [
+            eqx.nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim, key=keys[i])
+            for i in range(hidden_layers)
+        ]
+        self.rho_layers = [
+            eqx.nn.Linear(
+                hidden_dim if i == 0 else hidden_dim,
+                output_dim if i == hidden_layers - 1 else hidden_dim,
+                key=keys[hidden_layers + i],
+            )
+            for i in range(hidden_layers)
+        ]
+
+    def __call__(self, polynomial: Array) -> Array:
+        """
+        Args:
+        - polynomial: Array of shape (num_monomials, input_dim)
+
+        Returns:
+        - Array of shape (num_polynomials, output_dim)
+        """
+        h = polynomial
+        for layer in self.phi_layers:
+            h = jax.nn.relu(jax.vmap(layer)(h))
+        h_sum = jnp.sum(h, axis=0)
+        for layer in self.rho_layers:
+            h_sum = jax.nn.relu(layer(h_sum))
+        return h_sum
+
+
+class TransformerEncoderLayer(Module):
+    attention: eqx.nn.MultiheadAttention
+    layer_norm1: eqx.nn.LayerNorm
+    mlp: eqx.nn.MLP
+    layer_norm2: eqx.nn.LayerNorm
+
+    def __init__(
+        self,
+        embedding_dim: int,
+        num_heads: int,
+        feedforward_dim: int,
+        key: Array,
+    ):
+        key_attn, key_mlp = jax.random.split(key, 2)
+        self.attention = eqx.nn.MultiheadAttention(
+            num_heads=num_heads,
+            query_size=embedding_dim,
+            use_query_bias=True,
+            use_key_bias=True,
+            use_value_bias=True,
+            use_output_bias=True,
+            key=key_attn,
+        )
+        self.layer_norm1 = eqx.nn.LayerNorm(embedding_dim)
+        self.mlp = eqx.nn.MLP(
+            in_size=embedding_dim,
+            out_size=embedding_dim,
+            width_size=feedforward_dim,
+            depth=1,
+            activation=jax.nn.relu,
+            key=key_mlp,
+        )
+        self.layer_norm2 = eqx.nn.LayerNorm(embedding_dim)
+
+    def __call__(self, x: Array) -> Array:
+        # x: (seq_len, embedding_dim)
+
+        # Self-attention
+        attn_out = self.attention(x, x, x)
+
+        x = x + attn_out
+        x = jax.vmap(self.layer_norm1)(x)
+
+        mlp_out = jax.vmap(self.mlp)(x)
+        x = x + mlp_out
+        x = jax.vmap(self.layer_norm2)(x)
+
+        return x
+
+
+class IdealModel(Module):
+    layers: list[TransformerEncoderLayer]
+
+    def __init__(self, embedding_dim: int, num_heads: int, depth: int, key: Array):
+        """
+        Args:
+        - embedding_dim: Dimension of polynomial embeddings
+        - num_heads: Number of attention heads
+        - depth: Number of transformer layers
+        - key: JAX random key for initialization
+        """
+        keys = jax.random.split(key, depth)
+        self.layers = [
+            TransformerEncoderLayer(
+                embedding_dim, num_heads, 4 * embedding_dim, keys[i]
+            )
+            for i in range(depth)
+        ]
+
+    def __call__(self, ideal_embeddings: Array) -> Array:
+        """
+        Args:
+        - ideal_embeddings: Array of shape (num_polynomials, embedding_dim)
+
+        Returns:
+        - Array of shape (num_polynomials, embedding_dim)
+        """
+        x = ideal_embeddings
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
+class Extractor(Module):
+    monomial_embedder: MonomialEmbedder
+    polynomial_embedder: PolynomialEmbedder
+    ideal_model: IdealModel
+
+    def __init__(
+        self,
+        monomial_embedder: MonomialEmbedder,
+        polynomial_embedder: PolynomialEmbedder,
+        ideal_model: IdealModel,
+    ):
+        self.monomial_embedder = monomial_embedder
+        self.polynomial_embedder = polynomial_embedder
+        self.ideal_model = ideal_model
+
+    def __call__(self, obs: Observation) -> Array:
+        ideal, selectables = obs
+
+        poly_embeddings = []
+        for poly in ideal:
+            poly = jnp.asarray(poly)
+            monomial_embs = self.monomial_embedder(poly)
+            poly_emb = self.polynomial_embedder(monomial_embs)
+            poly_embeddings.append(poly_emb)
+
+        ideal_embeddings = jnp.stack(poly_embeddings)
+        ideal_embeddings = self.ideal_model(ideal_embeddings)
+
+        values = ideal_embeddings @ ideal_embeddings.T
+
+        mask = jnp.full(values.shape, -jnp.inf)
+        if selectables:
+            rows, cols = zip(*selectables)
+            rows = jnp.array(rows)
+            cols = jnp.array(cols)
+            mask = mask.at[rows, cols].set(0.0)
+
+        values = values + mask
+        return values.flatten()
+
+
+class GrobnerPolicy(Module):
+    extractor: Extractor
+
+    def __init__(self, extractor: Extractor):
         self.extractor = extractor
 
-    def forward(self, obs: tuple|list) -> torch.Tensor:
+    def __call__(self, obs: Observation) -> Array:
         # Return logits for training, not probabilities
         vals = self.extractor(obs)
         return vals
 
 
-class GrobnerValue(nn.Module):
-    extractor: nn.Module
+class GrobnerValue(Module):
+    extractor: Extractor
 
-    def __init__(self, extractor: nn.Module):
-        super(GrobnerValue, self).__init__()
-
+    def __init__(self, extractor: Extractor):
         self.extractor = extractor
 
-    def forward(self, obs: tuple|list) -> torch.Tensor:
+    def __call__(self, obs: Observation) -> Array:
+        """
+        Return the raw values produced by the extractor. For Equinox models we
+        expect the extractor to return a JAX array (or a list of arrays for a batch).
+        """
         vals = self.extractor(obs)
-
         return vals
 
 
-class GrobnerCritic(nn.Module):
-    extractor: nn.Module
+class GrobnerCritic(Module):
+    extractor: Extractor
 
-    def __init__(self, extractor: nn.Module):
-        super(GrobnerCritic, self).__init__()
-
+    def __init__(self, extractor: Extractor):
         self.extractor = extractor
 
-    def forward(self, obs: tuple|list) -> torch.Tensor:
+    def __call__(self, obs: Observation) -> Array:
+        """
+        Return a scalar (or per-batch scalars) representing the critic estimate.
+        If the extractor returns a list/tuple of arrays (batched), take the max
+        of each entry. Otherwise take the max over the flattened values.
+        """
         vals = self.extractor(obs)
+        state_value = jnp.max(vals)
 
-        if isinstance(vals, list):
-            # Batched output - take max of each
-            return torch.stack([torch.max(v) for v in vals])
-
-        max_val = torch.max(vals)
-
-        return max_val
+        return state_value
 
 
 if __name__ == "__main__":
-    num_vars = 3
-    num_monomials = 2
-    monoms_embedding_dim = 32
-    polys_embedding_dim = 64
-    ideal_depth = 2
-    ideal_num_heads = 4
+    # Configuration
+    num_vars = 10
+    num_monomials = 4
+    monoms_embedding_dim = 64
+    polys_embedding_dim = 128
+    ideal_depth = 8
+    ideal_num_heads = 8
+    num_polynomials = 100
 
-    extractor_policy = Extractor(num_vars, monoms_embedding_dim, polys_embedding_dim,
-                          ideal_depth, ideal_num_heads)
-    extractor_critic = Extractor(num_vars, monoms_embedding_dim, polys_embedding_dim,
-                            ideal_depth, ideal_num_heads)
+    # Create JAX random keys
+    key = jax.random.key(0)
+    key, k_monomial, k_polynomial, k_ideal = jax.random.split(key, 4)
 
-    policy = GrobnerPolicy(extractor_policy)
-    critic = GrobnerCritic(extractor_critic)
+    # Build Equinox modules
+    monomial_embedder = MonomialEmbedder(
+        monomial_dim=num_vars + 1, embedding_dim=monoms_embedding_dim, key=k_monomial
+    )
+    polynomial_embedder = PolynomialEmbedder(
+        input_dim=monoms_embedding_dim,
+        hidden_dim=polys_embedding_dim,
+        hidden_layers=2,
+        output_dim=polys_embedding_dim,
+        key=k_polynomial,
+    )
+    ideal_model = IdealModel(
+        embedding_dim=polys_embedding_dim,
+        num_heads=ideal_num_heads,
+        depth=ideal_depth,
+        key=k_ideal,
+    )
 
-    # Using numpy arrays as per the forward method's type hint
-    ideal = [[np.random.randn(num_vars+1) for _ in range(num_monomials)] for i in range(1,4)]
-    selectables = [(0, 1), (0, 2)]
+    # Compose extractor and high-level models
+    extractor_eqx = Extractor(
+        monomial_embedder=monomial_embedder,
+        polynomial_embedder=polynomial_embedder,
+        ideal_model=ideal_model,
+    )
 
-    obs = (ideal, selectables)
+    policy_eqx = GrobnerPolicy(extractor_eqx)
+    critic_eqx = GrobnerCritic(extractor_eqx)
 
-    print("Policy output:")
-    print(policy(obs))
-    print("\nCritic output:")
-    print(critic(obs))
+    # Create a synthetic ideal: a list of polynomials, each a (num_monomials, num_vars+1) array
+    key = jax.random.key(1)
+    keys = jax.random.split(key, num_polynomials)
+    ideal = [jax.random.normal(k, (num_monomials, num_vars + 1)) for k in keys]
+
+    # Example selectables (allowed (row, col) pairs in the flattened pairwise matrix)
+    selectables = [
+        (i, j) for i in range(num_polynomials) for j in range(i + 1, num_polynomials)
+    ]
+
+    obs_eqx = (ideal, selectables)
+
+    # Run policy and critic (Equinox models work with JAX arrays)
+    policy_out = policy_eqx(obs_eqx)
+    critic_out = critic_eqx(obs_eqx)
+
+    print("Equinox Policy output shape:", policy_out.shape)
+    print("Equinox Critic output:", critic_out)
