@@ -68,10 +68,10 @@ class PolynomialEmbedder(Module):
         h = polynomial
         for layer in self.phi_layers:
             h = jax.nn.relu(jax.vmap(layer)(h))
-        h_sum = jnp.sum(h, axis=0)
+        h_pooled = jnp.max(h, axis=0)
         for layer in self.rho_layers:
-            h_sum = jax.nn.relu(layer(h_sum))
-        return h_sum
+            h_pooled = jax.nn.relu(layer(h_pooled))
+        return h_pooled
 
 
 class TransformerEncoderLayer(Module):
@@ -157,20 +157,56 @@ class IdealModel(Module):
         return x
 
 
+class PairwiseScorer(Module):
+    mlp: eqx.nn.MLP
+
+    def __init__(self, embedding_dim: int, hidden_dim: int, key: Array):
+        self.mlp = eqx.nn.MLP(
+            in_size=embedding_dim,
+            out_size=1,
+            width_size=hidden_dim,
+            depth=2,
+            activation=jax.nn.relu,
+            key=key,
+        )
+
+    def __call__(self, embeddings: Array) -> Array:
+        """
+        Args:
+        - embeddings: Array of shape (num_polynomials, embedding_dim)
+
+        Returns:
+        - Array of shape (num_polynomials, num_polynomials)
+        """
+        # Create pairwise combinations (symmetric)
+        # (N, 1, D) + (1, N, D) -> (N, N, D)
+        pairwise_emb = embeddings[:, None, :] + embeddings[None, :, :]
+
+        # Apply MLP
+        # We can use vmap to apply MLP over the N, N dimensions
+        scores = jax.vmap(jax.vmap(self.mlp))(pairwise_emb)
+
+        # scores is (N, N, 1), squeeze to (N, N)
+        return jnp.squeeze(scores, axis=-1)
+
+
 class Extractor(Module):
     monomial_embedder: MonomialEmbedder
     polynomial_embedder: PolynomialEmbedder
     ideal_model: IdealModel
+    pairwise_scorer: PairwiseScorer
 
     def __init__(
         self,
         monomial_embedder: MonomialEmbedder,
         polynomial_embedder: PolynomialEmbedder,
         ideal_model: IdealModel,
+        pairwise_scorer: PairwiseScorer,
     ):
         self.monomial_embedder = monomial_embedder
         self.polynomial_embedder = polynomial_embedder
         self.ideal_model = ideal_model
+        self.pairwise_scorer = pairwise_scorer
 
     def __call__(self, obs: Observation) -> Array:
         ideal, selectables = obs
@@ -185,7 +221,7 @@ class Extractor(Module):
         ideal_embeddings = jnp.stack(poly_embeddings)
         ideal_embeddings = self.ideal_model(ideal_embeddings)
 
-        values = ideal_embeddings @ ideal_embeddings.T
+        values = self.pairwise_scorer(ideal_embeddings)
 
         mask = jnp.full(values.shape, -jnp.inf)
         if selectables:
