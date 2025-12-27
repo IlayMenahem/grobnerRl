@@ -143,6 +143,69 @@ def loss_and_accuracy(model: Module, observations: dict, actions: Array, loss_ma
 
     return loss, accuracy
 
+
+def evaluate_policy(
+    policy: Module,
+    policy_env: BuchbergerEnv,
+    expert_env: BuchbergerEnv,
+    expert_agent: BasicExpert,
+    episodes: int = 250,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Roll out the trained policy and compare it to an expert agent.
+
+    Args:
+    - policy (Module): Trained GrobnerPolicy.
+    - policy_env (BuchbergerEnv): Environment configured with tokenized observations for the policy.
+    - expert_env (BuchbergerEnv): Environment with symbolic observations for the expert.
+    - expert_agent (BasicExpert): Heuristic expert policy.
+    - episodes (int): Number of evaluation episodes.
+
+    Returns:
+    - Tuple of numpy arrays with policy rewards and expert rewards per episode.
+    """
+
+    model_rewards: list[float] = []
+    expert_rewards: list[float] = []
+
+    for episode in range(episodes):
+        obs, _ = policy_env.reset(seed=episode)
+        ep_reward = 0.0
+        done = False
+
+        while not done:
+            logits = policy(obs)
+            action = int(jnp.argmax(logits))
+
+            obs, reward, terminated, truncated, _ = policy_env.step(action)
+            ep_reward += float(reward)
+            done = terminated or truncated
+
+        model_rewards.append(ep_reward)
+
+        obs_exp, _ = expert_env.reset(seed=episode)
+        exp_reward = 0.0
+        done = False
+
+        while not done:
+            expert_action = expert_agent(obs_exp)
+            obs_exp, reward, terminated, truncated, _ = expert_env.step(expert_action)
+            exp_reward += float(reward)
+            done = terminated or truncated
+
+        expert_rewards.append(exp_reward)
+
+    model_mean = float(np.mean(model_rewards))
+    expert_mean = float(np.mean(expert_rewards))
+    ratio = model_mean / expert_mean
+
+    print(
+        f"Evaluation complete - Policy reward: {model_mean:.4f}, "
+        f"Expert reward: {expert_mean:.4f}, Performance ratio: {ratio:.4f}"
+    )
+
+    return np.array(model_rewards, dtype=np.float32), np.array(expert_rewards, dtype=np.float32)
+
 if __name__ == "__main__":
     def batch_fn(
         x: Sequence[tuple[Observation, Action]],
@@ -195,7 +258,7 @@ if __name__ == "__main__":
         
         return batched_obs, np.array(batched_actions, dtype=np.int32), np.array(loss_mask, dtype=np.float32)
 
-    num_vars = 8
+    num_vars = 5
     multiple = 4.55
     num_clauses = int(num_vars * multiple)
     ideal_dist = f"{num_vars}-{num_clauses}_sat3"
@@ -205,9 +268,9 @@ if __name__ == "__main__":
     critic_path = os.path.join("models", "imitation_critic.pth")
     device = "cpu"
     
-    num_epochs = 10 
+    num_epochs = 25
     batch_size = 128
-    dataset_size = 2**14
+    dataset_size = 2048
 
     # init models
     monomials_dim = num_vars + 1
@@ -234,7 +297,7 @@ if __name__ == "__main__":
     extractor_eqx = Extractor(monomial_embedder, polynomial_embedder, ideal_model, pairwise_scorer)
     policy = GrobnerPolicy(extractor_eqx)
 
-    optimizer = optax.nadam(1e-3)
+    optimizer = optax.nadam(3e-4)
 
     env = BuchbergerEnv(ideal_gen)
     expert_policy = BasicExpert(env)
@@ -246,11 +309,17 @@ if __name__ == "__main__":
     datasource = JsonDatasource(data_path, "states", "actions")
     train_sampler = IndexSampler(len(datasource) , ShardOptions(0, 1, True), True, 1, seed=0)
     train_dataloader = DataLoader(
-        data_source=datasource, sampler=train_sampler, operations=(to_batch,), worker_count=4
+        data_source=datasource, sampler=train_sampler, operations=(to_batch,), worker_count=1
     )
     val_sampler = IndexSampler(len(datasource), ShardOptions(0, 1, True), True, 1, seed=1)
     val_dataloader = DataLoader(
-        data_source=datasource, sampler=val_sampler, operations=(to_batch,), worker_count=4
+        data_source=datasource, sampler=val_sampler, operations=(to_batch,), worker_count=1
     )
 
-    model, losses_train, accuracy_train, losses_validation, accuracy_validation = train_model(policy, train_dataloader, val_dataloader, num_epochs, optimizer, loss_and_accuracy) 
+    model, losses_train, accuracy_train, losses_validation, accuracy_validation = train_model(policy, train_dataloader, val_dataloader, num_epochs, optimizer, loss_and_accuracy)
+
+    eval_policy_env = BuchbergerEnv(SAT3IdealGenerator(num_vars, num_clauses), mode="train")
+    eval_expert_env = BuchbergerEnv(SAT3IdealGenerator(num_vars, num_clauses))
+    eval_expert = BasicExpert(eval_expert_env)
+
+    evaluate_policy(model, eval_policy_env, eval_expert_env, eval_expert)
