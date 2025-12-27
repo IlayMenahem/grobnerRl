@@ -72,10 +72,8 @@ def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validat
             epoch_train_loss.append(loss)
             epoch_train_acc.append(acc)
 
-            print(f"Batch Train Loss: {loss:.4f}, Batch Train Acc: {acc:.4f}", epoch)
-        
-        t_loss = float(jnp.mean(jnp.array(epoch_train_loss))) if epoch_train_loss else 0.0
-        t_acc = float(jnp.mean(jnp.array(epoch_train_acc))) if epoch_train_acc else 0.0
+        t_loss = float(jnp.mean(jnp.array(epoch_train_loss)))
+        t_acc = float(jnp.mean(jnp.array(epoch_train_acc)))
         train_losses.append(t_loss)
         train_accuracies.append(t_acc)
 
@@ -87,10 +85,8 @@ def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validat
             epoch_val_loss.append(loss)
             epoch_val_acc.append(acc)
 
-            print(f"Batch Val Loss: {loss:.4f}, Batch Val Acc: {acc:.4f}")
-            
-        v_loss = float(jnp.mean(jnp.array(epoch_val_loss))) if epoch_val_loss else 0.0
-        v_acc = float(jnp.mean(jnp.array(epoch_val_acc))) if epoch_val_acc else 0.0
+        v_loss = float(jnp.mean(jnp.array(epoch_val_loss)))
+        v_acc = float(jnp.mean(jnp.array(epoch_val_acc)))
         val_losses.append(v_loss)
         val_accuracies.append(v_acc)
 
@@ -177,7 +173,7 @@ if __name__ == "__main__":
         
         return batched_obs, np.array(batched_actions, dtype=np.int32), np.array(loss_mask, dtype=np.float32)
 
-    num_vars = 3
+    num_vars = 8
     multiple = 4.55
     num_clauses = int(num_vars * multiple)
     ideal_dist = f"{num_vars}-{num_clauses}_sat3"
@@ -187,9 +183,9 @@ if __name__ == "__main__":
     critic_path = os.path.join("models", "imitation_critic.pth")
     device = "cpu"
     
-    num_epochs = 10
-    batch_size = 64
-    dataset_size = 1024
+    num_epochs = 10 
+    batch_size = 128
+    dataset_size = 2**14
 
     # init models
     monomials_dim = num_vars + 1
@@ -226,13 +222,13 @@ if __name__ == "__main__":
     
     to_batch = Batch(batch_size, True, batch_fn)
     datasource = JsonDatasource(data_path, "states", "actions")
-    train_sampler = IndexSampler(len(datasource) , ShardOptions(0, 1, True), True, seed=0)
+    train_sampler = IndexSampler(len(datasource) , ShardOptions(0, 1, True), True, 1, seed=0)
     train_dataloader = DataLoader(
-        data_source=datasource, sampler=train_sampler, operations=(to_batch,), worker_count=1
+        data_source=datasource, sampler=train_sampler, operations=(to_batch,), worker_count=4
     )
-    val_sampler = IndexSampler(len(datasource), ShardOptions(0, 1, True), True, seed=1)
+    val_sampler = IndexSampler(len(datasource), ShardOptions(0, 1, True), True, 1, seed=1)
     val_dataloader = DataLoader(
-        data_source=datasource, sampler=val_sampler, operations=(to_batch,), worker_count=1
+        data_source=datasource, sampler=val_sampler, operations=(to_batch,), worker_count=4
     )
 
     model, losses_train, accuracy_train, losses_validation, accuracy_validation = train_model(policy, train_dataloader, val_dataloader, num_epochs, optimizer, loss_and_accuracy) 
