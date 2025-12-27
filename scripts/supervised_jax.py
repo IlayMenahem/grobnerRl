@@ -10,6 +10,7 @@ from grobnerRl.experts import BasicExpert
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import equinox as eqx
 from jaxtyping import Array
@@ -41,9 +42,10 @@ def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validat
     """
     opt_state = optimizer.init(eqx.filter(policy, eqx.is_array))
 
-    def make_step(model, opt_state, observations, actions):
+    @eqx.filter_jit
+    def make_step(model: Module, opt_state: optax.OptState, observations: dict, actions: Array, loss_mask: Array) -> tuple[Module, optax.OptState, float, float]:
         def loss_fn(m):
-            loss, acc = loss_and_accuracy(m, observations, actions)
+            loss, acc = loss_and_accuracy(m, observations, actions, loss_mask)
             return loss, acc
 
         (loss, acc), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(model)
@@ -52,8 +54,8 @@ def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validat
         return model, opt_state, loss, acc
 
     @eqx.filter_jit
-    def eval_step(model, observations, actions):
-        loss, acc = loss_and_accuracy(model, observations, actions)
+    def eval_step(model: Module, observations: dict, actions: Array, loss_mask: Array) -> tuple[Array, Array]:
+        loss, acc = loss_and_accuracy(model, observations, actions, loss_mask)
         return loss, acc
 
     train_losses = []
@@ -65,8 +67,8 @@ def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validat
         epoch_train_loss = []
         epoch_train_acc = []
         
-        for observations, actions in dataloader_train:
-            policy, opt_state, loss, acc = make_step(policy, opt_state, observations, actions)
+        for observations, actions, loss_mask in dataloader_train:
+            policy, opt_state, loss, acc = make_step(policy, opt_state, observations, actions, loss_mask)
             epoch_train_loss.append(loss)
             epoch_train_acc.append(acc)
 
@@ -80,8 +82,8 @@ def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validat
         epoch_val_loss = []
         epoch_val_acc = []
         
-        for observations, actions in dataloader_validation:
-            loss, acc = eval_step(policy, observations, actions)
+        for observations, actions, loss_mask in dataloader_validation:
+            loss, acc = eval_step(policy, observations, actions, loss_mask)
             epoch_val_loss.append(loss)
             epoch_val_acc.append(acc)
 
@@ -96,43 +98,84 @@ def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validat
 
     return policy, train_losses, train_accuracies, val_losses, val_accuracies
 
-def loss_and_accuracy(model: Module, observations: Sequence[Observation], actions: Sequence[Action]) -> tuple[Array, Array]:
+def loss_and_accuracy(model: Module, observations: dict, actions: Array, loss_mask: Array) -> tuple[Array, Array]:
     """
     Compute the loss and accuracy for the given model on the provided observations and actions.
 
     Args:
     - model (Module): The GrobnerPolicy model.
-    - observations (Sequence[Observation]): A batch of observations.
-    - actions (Sequence[Action]): A batch of actions.
+    - observations (dict): A batch of observations (padded).
+    - actions (Array): A batch of actions.
+    - loss_mask (Array): A batch of loss masks (1.0 for valid, 0.0 for invalid).
 
     Returns:
     - loss (Array): The computed loss.
     - accuracy (Array): The computed accuracy.
     """
-    logits_per_obs = [model(obs) for obs in observations]
-    max_logit_len = max(logit.shape[0] for logit in logits_per_obs)
+    logits = eqx.filter_vmap(model)(observations)
 
-    def pad_to_max_length(array, target_len):
-        pad_width = [(0, target_len - array.shape[0])] + [(0, 0)] * (array.ndim - 1)
-        return jnp.pad(array, pad_width, constant_values=-jnp.inf)
-
-    logits = jnp.stack([pad_to_max_length(logit, max_logit_len) for logit in logits_per_obs])
-    targets = jnp.array(actions)
-
-    loss = optax.softmax_cross_entropy_with_integer_labels(logits, targets).mean()
+    per_sample_loss = optax.softmax_cross_entropy_with_integer_labels(logits, actions)
+    
+    # Apply mask
+    loss = (per_sample_loss * loss_mask).sum() / (loss_mask.sum() + 1e-9)
 
     predicted_actions = jnp.argmax(logits, axis=-1)
-    accuracy = jnp.mean(predicted_actions == targets)
+    correct = (predicted_actions == actions) * loss_mask
+    accuracy = correct.sum() / (loss_mask.sum() + 1e-9)
 
     return loss, accuracy
 
 if __name__ == "__main__":
     def batch_fn(
         x: Sequence[tuple[Observation, Action]],
-    ) -> tuple[Sequence[Observation], Sequence[Action]]:
+    ) -> tuple[dict, np.ndarray, np.ndarray]:
         observations, actions = zip(*x)
+        batch_size = len(observations)
+        
+        # 1. Calculate dimensions
+        max_polys = max(len(obs[0]) for obs in observations)
+        max_monoms = max(max(len(p) for p in obs[0]) for obs in observations)
+        num_vars = len(observations[0][0][0][0])
 
-        return observations, actions
+        # 2. Allocate buffers
+        batched_ideals = np.zeros((batch_size, max_polys, max_monoms, num_vars), dtype=np.float32)
+        batched_monomial_masks = np.zeros((batch_size, max_polys, max_monoms), dtype=bool)
+        batched_poly_masks = np.zeros((batch_size, max_polys), dtype=bool)
+        batched_selectables = np.full((batch_size, max_polys, max_polys), -np.inf, dtype=np.float32)
+        
+        batched_actions = []
+        loss_mask = []
+
+        for i, (ideal, selectables) in enumerate(observations):
+            num_polys = len(ideal)
+            batched_poly_masks[i, :num_polys] = True
+            
+            for j, poly in enumerate(ideal):
+                p_len = len(poly)
+                batched_ideals[i, j, :p_len] = poly
+                batched_monomial_masks[i, j, :p_len] = True
+                
+            if selectables:
+                rows, cols = zip(*selectables)
+                batched_selectables[i, rows, cols] = 0.0
+                
+                # Remap action index
+                r, c = divmod(actions[i], num_polys)
+                batched_actions.append(r * max_polys + c)
+                loss_mask.append(1.0)
+            else:
+                batched_selectables[i, 0, 0] = 0.0
+                batched_actions.append(0)
+                loss_mask.append(0.0)
+
+        batched_obs = {
+            "ideals": batched_ideals,
+            "monomial_masks": batched_monomial_masks,
+            "poly_masks": batched_poly_masks,
+            "selectables": batched_selectables
+        }
+        
+        return batched_obs, np.array(batched_actions, dtype=np.int32), np.array(loss_mask, dtype=np.float32)
 
     num_vars = 3
     multiple = 4.55
@@ -183,7 +226,7 @@ if __name__ == "__main__":
     
     to_batch = Batch(batch_size, True, batch_fn)
     datasource = JsonDatasource(data_path, "states", "actions")
-    train_sampler = IndexSampler(len(datasource), ShardOptions(0, 1, True), True, seed=0)
+    train_sampler = IndexSampler(len(datasource) , ShardOptions(0, 1, True), True, seed=0)
     train_dataloader = DataLoader(
         data_source=datasource, sampler=train_sampler, operations=(to_batch,), worker_count=1
     )

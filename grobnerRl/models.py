@@ -78,6 +78,8 @@ class PolynomialEmbedder(Module):
             h = jnp.where(mask[:, None], h, -jnp.inf)
 
         h_pooled = jnp.max(h, axis=0)
+        h_pooled = jnp.where(jnp.isneginf(h_pooled), 0.0, h_pooled)
+        
         for layer in self.rho_layers:
             h_pooled = jax.nn.relu(layer(h_pooled))
         return h_pooled
@@ -118,11 +120,17 @@ class TransformerEncoderLayer(Module):
         self.layer_norm2 = eqx.nn.LayerNorm(embedding_dim)
 
     @filter_jit
-    def __call__(self, x: Array) -> Array:
+    def __call__(self, x: Array, mask: Array | None = None) -> Array:
         # x: (seq_len, embedding_dim)
 
         # Self-attention
-        attn_out = self.attention(x, x, x)
+        if mask is not None:
+            attn_mask = jnp.where(mask, 0.0, -jnp.inf)
+            attn_mask = jnp.broadcast_to(attn_mask[None, :], (x.shape[0], x.shape[0]))
+        else:
+            attn_mask = None
+
+        attn_out = self.attention(x, x, x, mask=attn_mask)
 
         x = x + attn_out
         x = jax.vmap(self.layer_norm1)(x)
@@ -154,17 +162,18 @@ class IdealModel(Module):
         ]
 
     @filter_jit
-    def __call__(self, ideal_embeddings: Array) -> Array:
+    def __call__(self, ideal_embeddings: Array, mask: Array | None = None) -> Array:
         """
         Args:
         - ideal_embeddings: Array of shape (num_polynomials, embedding_dim)
+        - mask: Optional boolean array of shape (num_polynomials,)
 
         Returns:
         - Array of shape (num_polynomials, embedding_dim)
         """
         x = ideal_embeddings
         for layer in self.layers:
-            x = layer(x)
+            x = layer(x, mask=mask)
         return x
 
 
@@ -220,7 +229,26 @@ class Extractor(Module):
         self.ideal_model = ideal_model
         self.pairwise_scorer = pairwise_scorer
 
-    def __call__(self, obs: Observation) -> Array:
+    def __call__(self, obs: Observation | dict) -> Array:
+        if isinstance(obs, dict):
+            ideal_stacked = obs["ideals"]
+            masks_stacked = obs["monomial_masks"]
+            poly_mask = obs["poly_masks"]
+            selectables_mask = obs["selectables"]
+            
+            monomial_embs = jax.vmap(self.monomial_embedder)(ideal_stacked)
+            ideal_embeddings = jax.vmap(self.polynomial_embedder)(
+                monomial_embs, masks_stacked
+            )
+
+            ideal_embeddings = self.ideal_model(ideal_embeddings, mask=poly_mask)
+
+            values = self.pairwise_scorer(ideal_embeddings)
+            
+            # Apply selectables mask
+            values = values + selectables_mask
+            return values.flatten()
+
         ideal, selectables = obs
 
         # Pad polynomials to the same length
@@ -252,7 +280,9 @@ class Extractor(Module):
             monomial_embs, masks_stacked
         )
 
-        ideal_embeddings = self.ideal_model(ideal_embeddings)
+        poly_mask = jnp.ones(ideal_embeddings.shape[0], dtype=bool)
+        
+        ideal_embeddings = self.ideal_model(ideal_embeddings, mask=poly_mask)
 
         values = self.pairwise_scorer(ideal_embeddings)
 
@@ -273,7 +303,7 @@ class GrobnerPolicy(Module):
     def __init__(self, extractor: Extractor):
         self.extractor = extractor
 
-    def __call__(self, obs: Observation) -> Array:
+    def __call__(self, obs: Observation | dict) -> Array:
         # Return logits for training, not probabilities
         vals = self.extractor(obs)
         return vals
