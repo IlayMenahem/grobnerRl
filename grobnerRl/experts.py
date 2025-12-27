@@ -325,7 +325,8 @@ class ClosestLMExpert(BasisBasedExpert):
         """
 
         def distance(m1: tuple[int, ...], m2: tuple[int, ...]) -> int:
-            return sum(abs(a - b) for a, b in zip(m1, m2))
+            diff_monomial = tuple(abs(a - b) for a, b in zip(m1, m2))
+            return G[0].ring.order(diff_monomial)
 
         G, P = observation
         leading_monomial_by_pair = lm_by_pair(self.env, G, P)
