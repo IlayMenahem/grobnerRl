@@ -1,7 +1,7 @@
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from equinox import Module
+from equinox import Module, filter_jit
 from jaxtyping import Array
 
 from grobnerRl.types import Observation
@@ -13,6 +13,7 @@ class MonomialEmbedder(Module):
     def __init__(self, monomial_dim: int, embedding_dim: int, key: Array):
         self.linear = eqx.nn.Linear(monomial_dim, embedding_dim, key=key)
 
+    @filter_jit
     def __call__(self, monomials: Array) -> Array:
         """
         Args:
@@ -57,10 +58,12 @@ class PolynomialEmbedder(Module):
             for i in range(hidden_layers)
         ]
 
-    def __call__(self, polynomial: Array) -> Array:
+    @filter_jit
+    def __call__(self, polynomial: Array, mask: Array | None = None) -> Array:
         """
         Args:
         - polynomial: Array of shape (num_monomials, input_dim)
+        - mask: Optional boolean array of shape (num_monomials,) indicating valid monomials.
 
         Returns:
         - Array of shape (num_polynomials, output_dim)
@@ -68,6 +71,12 @@ class PolynomialEmbedder(Module):
         h = polynomial
         for layer in self.phi_layers:
             h = jax.nn.relu(jax.vmap(layer)(h))
+        
+        if mask is not None:
+            # Broadcast mask to (num_monomials, hidden_dim)
+            # Use a large negative number for masked values so max pooling ignores them
+            h = jnp.where(mask[:, None], h, -jnp.inf)
+
         h_pooled = jnp.max(h, axis=0)
         for layer in self.rho_layers:
             h_pooled = jax.nn.relu(layer(h_pooled))
@@ -108,6 +117,7 @@ class TransformerEncoderLayer(Module):
         )
         self.layer_norm2 = eqx.nn.LayerNorm(embedding_dim)
 
+    @filter_jit
     def __call__(self, x: Array) -> Array:
         # x: (seq_len, embedding_dim)
 
@@ -143,6 +153,7 @@ class IdealModel(Module):
             for i in range(depth)
         ]
 
+    @filter_jit
     def __call__(self, ideal_embeddings: Array) -> Array:
         """
         Args:
@@ -170,6 +181,7 @@ class PairwiseScorer(Module):
             key=key,
         )
 
+    @filter_jit
     def __call__(self, embeddings: Array) -> Array:
         """
         Args:
@@ -211,14 +223,35 @@ class Extractor(Module):
     def __call__(self, obs: Observation) -> Array:
         ideal, selectables = obs
 
-        poly_embeddings = []
-        for poly in ideal:
-            poly = jnp.asarray(poly)
-            monomial_embs = self.monomial_embedder(poly)
-            poly_emb = self.polynomial_embedder(monomial_embs)
-            poly_embeddings.append(poly_emb)
+        # Pad polynomials to the same length
+        ideal_arrays = [jnp.asarray(p) for p in ideal]
+        lengths = [p.shape[0] for p in ideal_arrays]
+        max_len = max(lengths) if lengths else 0
 
-        ideal_embeddings = jnp.stack(poly_embeddings)
+        padded_ideal = []
+        masks = []
+        for p in ideal_arrays:
+            l = p.shape[0]
+            pad_len = max_len - l
+            if pad_len > 0:
+                p_padded = jnp.pad(p, ((0, pad_len), (0, 0)), constant_values=0)
+                mask = jnp.concatenate(
+                    [jnp.ones(l, dtype=bool), jnp.zeros(pad_len, dtype=bool)]
+                )
+            else:
+                p_padded = p
+                mask = jnp.ones(l, dtype=bool)
+            padded_ideal.append(p_padded)
+            masks.append(mask)
+
+        ideal_stacked = jnp.stack(padded_ideal)
+        masks_stacked = jnp.stack(masks)
+
+        monomial_embs = jax.vmap(self.monomial_embedder)(ideal_stacked)
+        ideal_embeddings = jax.vmap(self.polynomial_embedder)(
+            monomial_embs, masks_stacked
+        )
+
         ideal_embeddings = self.ideal_model(ideal_embeddings)
 
         values = self.pairwise_scorer(ideal_embeddings)
@@ -291,7 +324,7 @@ if __name__ == "__main__":
 
     # Create JAX random keys
     key = jax.random.key(0)
-    key, k_monomial, k_polynomial, k_ideal = jax.random.split(key, 4)
+    key, k_monomial, k_polynomial, k_ideal, k_pairwise = jax.random.split(key, 5)
 
     # Build Equinox modules
     monomial_embedder = MonomialEmbedder(
@@ -310,12 +343,18 @@ if __name__ == "__main__":
         depth=ideal_depth,
         key=k_ideal,
     )
+    pairwise_scorer = PairwiseScorer(
+        embedding_dim=polys_embedding_dim,
+        hidden_dim=polys_embedding_dim,
+        key=k_pairwise,
+    )
 
     # Compose extractor and high-level models
     extractor_eqx = Extractor(
         monomial_embedder=monomial_embedder,
         polynomial_embedder=polynomial_embedder,
         ideal_model=ideal_model,
+        pairwise_scorer=pairwise_scorer,
     )
 
     policy_eqx = GrobnerPolicy(extractor_eqx)
