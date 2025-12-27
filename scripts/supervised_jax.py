@@ -21,7 +21,7 @@ from grain.sharding import ShardOptions
 from grain.transforms import Batch
 
 
-def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validation: DataLoader, num_epochs: int, optimizer: optax.GradientTransformation, loss_and_accuracy: Callable)->tuple[Module, list[float], list[float], list[float], list[float]]:
+def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validation: DataLoader, num_epochs: int, optimizer: optax.GradientTransformation, loss_and_accuracy: Callable) -> tuple[Module, Array, Array, Array, Array]:
     """
     Train the model using supervised learning.
 
@@ -35,15 +35,15 @@ def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validat
     
     Returns:
     - Trained model (Module).
-    - Training losses (list of float).
-    - Training accuracies (list of float).
-    - Validation losses (list of float).
-    - Validation accuracies (list of float).   
+    - Training losses (Array).
+    - Training accuracies (Array).
+    - Validation losses (Array).
+    - Validation accuracies (Array).   
     """
     opt_state = optimizer.init(eqx.filter(policy, eqx.is_array))
 
     @eqx.filter_jit
-    def make_step(model: Module, opt_state: optax.OptState, observations: dict, actions: Array, loss_mask: Array) -> tuple[Module, optax.OptState, float, float]:
+    def make_step(model: Module, opt_state: optax.OptState, observations: dict, actions: Array, loss_mask: Array) -> tuple[Module, optax.OptState, Array, Array]:
         def loss_fn(m):
             loss, acc = loss_and_accuracy(m, observations, actions, loss_mask)
             return loss, acc
@@ -58,41 +58,63 @@ def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validat
         loss, acc = loss_and_accuracy(model, observations, actions, loss_mask)
         return loss, acc
 
-    train_losses = []
-    train_accuracies = []
-    val_losses = []
-    val_accuracies = []
-
-    for epoch in range(num_epochs):
-        epoch_train_loss = []
-        epoch_train_acc = []
+    @eqx.filter_jit
+    def train_epoch(policy: Module, opt_state: optax.OptState) -> tuple[Module, optax.OptState, Array, Array]:
+        epoch_losses = []
+        epoch_accs = []
         
         for observations, actions, loss_mask in dataloader_train:
             policy, opt_state, loss, acc = make_step(policy, opt_state, observations, actions, loss_mask)
-            epoch_train_loss.append(loss)
-            epoch_train_acc.append(acc)
+            epoch_losses.append(loss)
+            epoch_accs.append(acc)
+        
+        loss = jnp.mean(jnp.array(epoch_losses))
+        accuracy = jnp.mean(jnp.array(epoch_accs))
 
-        t_loss = float(jnp.mean(jnp.array(epoch_train_loss)))
-        t_acc = float(jnp.mean(jnp.array(epoch_train_acc)))
-        train_losses.append(t_loss)
-        train_accuracies.append(t_acc)
+        return policy, opt_state, loss, accuracy
 
-        epoch_val_loss = []
-        epoch_val_acc = []
+    @eqx.filter_jit
+    def validate_epoch(policy: Module) -> tuple[Array, Array]:
+        epoch_losses = []
+        epoch_accs = []
         
         for observations, actions, loss_mask in dataloader_validation:
             loss, acc = eval_step(policy, observations, actions, loss_mask)
-            epoch_val_loss.append(loss)
-            epoch_val_acc.append(acc)
+            epoch_losses.append(loss)
+            epoch_accs.append(acc)
+        
+        loss = jnp.mean(jnp.array(epoch_losses))
+        accuracy = jnp.mean(jnp.array(epoch_accs))
 
-        v_loss = float(jnp.mean(jnp.array(epoch_val_loss)))
-        v_acc = float(jnp.mean(jnp.array(epoch_val_acc)))
+        return loss, accuracy
+
+    train_losses: list[Array] = []
+    train_accuracies: list[Array] = []
+    val_losses: list[Array] = []
+    val_accuracies: list[Array] = []
+
+    for epoch in range(num_epochs):
+        policy, opt_state, t_loss, t_acc = train_epoch(policy, opt_state)
+        v_loss, v_acc = validate_epoch(policy)
+
+        train_losses.append(t_loss)
+        train_accuracies.append(t_acc)
         val_losses.append(v_loss)
         val_accuracies.append(v_acc)
 
-        print(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {t_loss:.4f}, Train Acc: {t_acc:.4f}, Val Loss: {v_loss:.4f}, Val Acc: {v_acc:.4f}")
+        print(
+            f"Epoch {epoch + 1}/{num_epochs}, "
+            f"Train Loss: {float(t_loss):.4f}, Train Acc: {float(t_acc):.4f}, "
+            f"Val Loss: {float(v_loss):.4f}, Val Acc: {float(v_acc):.4f}"
+        )
 
-    return policy, train_losses, train_accuracies, val_losses, val_accuracies
+    return (
+        policy,
+        jnp.stack(train_losses),
+        jnp.stack(train_accuracies),
+        jnp.stack(val_losses),
+        jnp.stack(val_accuracies),
+    )
 
 def loss_and_accuracy(model: Module, observations: dict, actions: Array, loss_mask: Array) -> tuple[Array, Array]:
     """
