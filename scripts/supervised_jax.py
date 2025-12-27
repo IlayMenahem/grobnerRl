@@ -21,7 +21,31 @@ from grain.sharding import ShardOptions
 from grain.transforms import Batch
 
 
-def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validation: DataLoader, num_epochs: int, optimizer: optax.GradientTransformation, loss_and_accuracy: Callable) -> tuple[Module, Array, Array, Array, Array]:
+def save_checkpoint(model: Module, opt_state: optax.OptState, checkpoint_dir: str, label: str, epoch: int, val_accuracy: float) -> str:
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    ckpt_path = os.path.join(checkpoint_dir, f"{label}.eqx")
+    payload = {
+        "model": model,
+        "opt_state": opt_state,
+        "epoch": epoch,
+        "val_accuracy": val_accuracy,
+    }
+    with open(ckpt_path, "wb") as f:
+        eqx.tree_serialise_leaves(f, payload)
+    return ckpt_path
+
+
+def train_model(
+    policy: Module,
+    dataloader_train: DataLoader,
+    dataloader_validation: DataLoader,
+    num_epochs: int,
+    optimizer: optax.GradientTransformation,
+    loss_and_accuracy: Callable,
+    checkpoint_dir: str | None = None,
+    early_stopping_patience: int | None = None,
+    min_delta: float = 0.0,
+) -> tuple[Module, Array, Array, Array, Array]:
     """
     Train the model using supervised learning.
 
@@ -32,6 +56,9 @@ def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validat
     - num_epochs (int): Number of epochs to train.
     - optimizer (optax.GradientTransformation): Optax optimizer.
     - loss_and_accuracy (Callable): Function to compute loss and accuracy.
+    - checkpoint_dir (str | None): Directory to save checkpoints. If None, no checkpoints are written.
+    - early_stopping_patience (int | None): Stop if validation accuracy does not improve for this many epochs. If None, early stopping is disabled.
+    - min_delta (float): Minimum improvement in validation accuracy to reset the early-stopping counter.
     
     Returns:
     - Trained model (Module).
@@ -58,7 +85,6 @@ def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validat
         loss, acc = loss_and_accuracy(model, observations, actions, loss_mask)
         return loss, acc
 
-    @eqx.filter_jit
     def train_epoch(policy: Module, opt_state: optax.OptState) -> tuple[Module, optax.OptState, Array, Array]:
         epoch_losses = []
         epoch_accs = []
@@ -73,7 +99,6 @@ def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validat
 
         return policy, opt_state, loss, accuracy
 
-    @eqx.filter_jit
     def validate_epoch(policy: Module) -> tuple[Array, Array]:
         epoch_losses = []
         epoch_accs = []
@@ -92,6 +117,8 @@ def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validat
     train_accuracies: list[Array] = []
     val_losses: list[Array] = []
     val_accuracies: list[Array] = []
+    best_val_acc = float("-inf")
+    no_improve_epochs = 0
 
     for epoch in range(num_epochs):
         policy, opt_state, t_loss, t_acc = train_epoch(policy, opt_state)
@@ -102,11 +129,31 @@ def train_model(policy: Module, dataloader_train: DataLoader, dataloader_validat
         val_losses.append(v_loss)
         val_accuracies.append(v_acc)
 
+        val_acc_value = float(v_acc)
         print(
             f"Epoch {epoch + 1}/{num_epochs}, "
             f"Train Loss: {float(t_loss):.4f}, Train Acc: {float(t_acc):.4f}, "
-            f"Val Loss: {float(v_loss):.4f}, Val Acc: {float(v_acc):.4f}"
+            f"Val Loss: {float(v_loss):.4f}, Val Acc: {val_acc_value:.4f}"
         )
+
+        improved = val_acc_value > best_val_acc + min_delta
+        if improved:
+            best_val_acc = val_acc_value
+            no_improve_epochs = 0
+        else:
+            no_improve_epochs += 1
+
+        if checkpoint_dir:
+            save_checkpoint(policy, opt_state, checkpoint_dir, "last", epoch + 1, val_acc_value)
+
+            if improved:
+                save_checkpoint(policy, opt_state, checkpoint_dir, "best", epoch + 1, val_acc_value)
+
+        if early_stopping_patience is not None and no_improve_epochs >= early_stopping_patience:
+            print(
+                f"Early stopping at epoch {epoch + 1} (no val accuracy improvement > {min_delta} for {early_stopping_patience} epochs)."
+            )
+            break
 
     return (
         policy,
@@ -149,7 +196,7 @@ def evaluate_policy(
     policy_env: BuchbergerEnv,
     expert_env: BuchbergerEnv,
     expert_agent: BasicExpert,
-    episodes: int = 250,
+    episodes: int = 100,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Roll out the trained policy and compare it to an expert agent.
@@ -264,13 +311,16 @@ if __name__ == "__main__":
     ideal_dist = f"{num_vars}-{num_clauses}_sat3"
     ideal_gen = SAT3IdealGenerator(num_vars, num_clauses)
     data_path = os.path.join("data", f"{ideal_dist}.json")
+    checkpoint_dir = os.path.join("models", "checkpoints")
     actor_path = os.path.join("models", "imitation_policy.pth")
     critic_path = os.path.join("models", "imitation_critic.pth")
     device = "cpu"
     
-    num_epochs = 25
+    num_epochs = 50
     batch_size = 128
     dataset_size = 2048
+    early_stopping_patience = 1
+    min_delta = 1e-3
 
     # init models
     monomials_dim = num_vars + 1
@@ -316,10 +366,12 @@ if __name__ == "__main__":
         data_source=datasource, sampler=val_sampler, operations=(to_batch,), worker_count=1
     )
 
-    model, losses_train, accuracy_train, losses_validation, accuracy_validation = train_model(policy, train_dataloader, val_dataloader, num_epochs, optimizer, loss_and_accuracy)
+
+    model, losses_train, accuracy_train, losses_validation, accuracy_validation = train_model(policy, train_dataloader, val_dataloader, num_epochs, optimizer, loss_and_accuracy, checkpoint_dir, early_stopping_patience, min_delta)
 
     eval_policy_env = BuchbergerEnv(SAT3IdealGenerator(num_vars, num_clauses), mode="train")
     eval_expert_env = BuchbergerEnv(SAT3IdealGenerator(num_vars, num_clauses))
     eval_expert = BasicExpert(eval_expert_env)
+    episodes = 100
 
-    evaluate_policy(model, eval_policy_env, eval_expert_env, eval_expert)
+    evaluate_policy(model, eval_policy_env, eval_expert_env, eval_expert, episodes)
