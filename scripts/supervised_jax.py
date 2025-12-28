@@ -1,27 +1,41 @@
 import os
-from typing import Sequence, Callable
+from typing import Callable, Sequence
 
-from grobnerRl.envs.ideals import SAT3IdealGenerator
-from grobnerRl.types import Observation, Action
-from grobnerRl.data import JsonDatasource, generate_expert_data
-from grobnerRl.models import MonomialEmbedder, PolynomialEmbedder, IdealModel, GrobnerPolicy, Extractor, PairwiseScorer
-from grobnerRl.envs.env import BuchbergerEnv
-from grobnerRl.experts import BasicExpert
-
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import equinox as eqx
-from jaxtyping import Array
 from equinox import Module
 from grain import DataLoader
 from grain.samplers import IndexSampler
 from grain.sharding import ShardOptions
 from grain.transforms import Batch
+from jaxtyping import Array
+
+from grobnerRl.data import JsonDatasource, generate_expert_data
+from grobnerRl.envs.env import BuchbergerEnv
+from grobnerRl.envs.ideals import SAT3IdealGenerator
+from grobnerRl.experts import BasicExpert
+from grobnerRl.models import (
+    Extractor,
+    GrobnerPolicy,
+    IdealModel,
+    MonomialEmbedder,
+    PairwiseScorer,
+    PolynomialEmbedder,
+)
+from grobnerRl.types import Action, Observation
 
 
-def save_checkpoint(model: Module, opt_state: optax.OptState, checkpoint_dir: str, label: str, epoch: int, val_accuracy: float) -> str:
+def save_checkpoint(
+    model: Module,
+    opt_state: optax.OptState,
+    checkpoint_dir: str,
+    label: str,
+    epoch: int,
+    val_accuracy: float,
+) -> str:
     os.makedirs(checkpoint_dir, exist_ok=True)
     ckpt_path = os.path.join(checkpoint_dir, f"{label}.eqx")
     payload = {
@@ -59,18 +73,24 @@ def train_model(
     - checkpoint_dir (str | None): Directory to save checkpoints. If None, no checkpoints are written.
     - early_stopping_patience (int | None): Stop if validation accuracy does not improve for this many epochs. If None, early stopping is disabled.
     - min_delta (float): Minimum improvement in validation accuracy to reset the early-stopping counter.
-    
+
     Returns:
     - Trained model (Module).
     - Training losses (Array).
     - Training accuracies (Array).
     - Validation losses (Array).
-    - Validation accuracies (Array).   
+    - Validation accuracies (Array).
     """
     opt_state = optimizer.init(eqx.filter(policy, eqx.is_array))
 
     @eqx.filter_jit
-    def make_step(model: Module, opt_state: optax.OptState, observations: dict, actions: Array, loss_mask: Array) -> tuple[Module, optax.OptState, Array, Array]:
+    def make_step(
+        model: Module,
+        opt_state: optax.OptState,
+        observations: dict,
+        actions: Array,
+        loss_mask: Array,
+    ) -> tuple[Module, optax.OptState, Array, Array]:
         def loss_fn(m):
             loss, acc = loss_and_accuracy(m, observations, actions, loss_mask)
             return loss, acc
@@ -81,19 +101,25 @@ def train_model(
         return model, opt_state, loss, acc
 
     @eqx.filter_jit
-    def eval_step(model: Module, observations: dict, actions: Array, loss_mask: Array) -> tuple[Array, Array]:
+    def eval_step(
+        model: Module, observations: dict, actions: Array, loss_mask: Array
+    ) -> tuple[Array, Array]:
         loss, acc = loss_and_accuracy(model, observations, actions, loss_mask)
         return loss, acc
 
-    def train_epoch(policy: Module, opt_state: optax.OptState) -> tuple[Module, optax.OptState, Array, Array]:
+    def train_epoch(
+        policy: Module, opt_state: optax.OptState
+    ) -> tuple[Module, optax.OptState, Array, Array]:
         epoch_losses = []
         epoch_accs = []
-        
+
         for observations, actions, loss_mask in dataloader_train:
-            policy, opt_state, loss, acc = make_step(policy, opt_state, observations, actions, loss_mask)
+            policy, opt_state, loss, acc = make_step(
+                policy, opt_state, observations, actions, loss_mask
+            )
             epoch_losses.append(loss)
             epoch_accs.append(acc)
-        
+
         loss = jnp.mean(jnp.array(epoch_losses))
         accuracy = jnp.mean(jnp.array(epoch_accs))
 
@@ -102,12 +128,12 @@ def train_model(
     def validate_epoch(policy: Module) -> tuple[Array, Array]:
         epoch_losses = []
         epoch_accs = []
-        
+
         for observations, actions, loss_mask in dataloader_validation:
             loss, acc = eval_step(policy, observations, actions, loss_mask)
             epoch_losses.append(loss)
             epoch_accs.append(acc)
-        
+
         loss = jnp.mean(jnp.array(epoch_losses))
         accuracy = jnp.mean(jnp.array(epoch_accs))
 
@@ -144,12 +170,19 @@ def train_model(
             no_improve_epochs += 1
 
         if checkpoint_dir:
-            save_checkpoint(policy, opt_state, checkpoint_dir, "last", epoch + 1, val_acc_value)
+            save_checkpoint(
+                policy, opt_state, checkpoint_dir, "last", epoch + 1, val_acc_value
+            )
 
             if improved:
-                save_checkpoint(policy, opt_state, checkpoint_dir, "best", epoch + 1, val_acc_value)
+                save_checkpoint(
+                    policy, opt_state, checkpoint_dir, "best", epoch + 1, val_acc_value
+                )
 
-        if early_stopping_patience is not None and no_improve_epochs >= early_stopping_patience:
+        if (
+            early_stopping_patience is not None
+            and no_improve_epochs >= early_stopping_patience
+        ):
             print(
                 f"Early stopping at epoch {epoch + 1} (no val accuracy improvement > {min_delta} for {early_stopping_patience} epochs)."
             )
@@ -163,7 +196,10 @@ def train_model(
         jnp.stack(val_accuracies),
     )
 
-def loss_and_accuracy(model: Module, observations: dict, actions: Array, loss_mask: Array) -> tuple[Array, Array]:
+
+def loss_and_accuracy(
+    model: Module, observations: dict, actions: Array, loss_mask: Array
+) -> tuple[Array, Array]:
     """
     Compute the loss and accuracy for the given model on the provided observations and actions.
 
@@ -180,7 +216,7 @@ def loss_and_accuracy(model: Module, observations: dict, actions: Array, loss_ma
     logits = eqx.filter_vmap(model)(observations)
 
     per_sample_loss = optax.softmax_cross_entropy_with_integer_labels(logits, actions)
-    
+
     # Apply mask
     loss = (per_sample_loss * loss_mask).sum() / (loss_mask.sum() + 1e-9)
 
@@ -251,42 +287,52 @@ def evaluate_policy(
         f"Expert reward: {expert_mean:.4f}, Performance ratio: {ratio:.4f}"
     )
 
-    return np.array(model_rewards, dtype=np.float32), np.array(expert_rewards, dtype=np.float32)
+    return np.array(model_rewards, dtype=np.float32), np.array(
+        expert_rewards, dtype=np.float32
+    )
+
 
 if __name__ == "__main__":
+
     def batch_fn(
         x: Sequence[tuple[Observation, Action]],
     ) -> tuple[dict, np.ndarray, np.ndarray]:
         observations, actions = zip(*x)
         batch_size = len(observations)
-        
+
         # 1. Calculate dimensions
         max_polys = max(len(obs[0]) for obs in observations)
         max_monoms = max(max(len(p) for p in obs[0]) for obs in observations)
         num_vars = len(observations[0][0][0][0])
 
         # 2. Allocate buffers
-        batched_ideals = np.zeros((batch_size, max_polys, max_monoms, num_vars), dtype=np.float32)
-        batched_monomial_masks = np.zeros((batch_size, max_polys, max_monoms), dtype=bool)
+        batched_ideals = np.zeros(
+            (batch_size, max_polys, max_monoms, num_vars), dtype=np.float32
+        )
+        batched_monomial_masks = np.zeros(
+            (batch_size, max_polys, max_monoms), dtype=bool
+        )
         batched_poly_masks = np.zeros((batch_size, max_polys), dtype=bool)
-        batched_selectables = np.full((batch_size, max_polys, max_polys), -np.inf, dtype=np.float32)
-        
+        batched_selectables = np.full(
+            (batch_size, max_polys, max_polys), -np.inf, dtype=np.float32
+        )
+
         batched_actions = []
         loss_mask = []
 
         for i, (ideal, selectables) in enumerate(observations):
             num_polys = len(ideal)
             batched_poly_masks[i, :num_polys] = True
-            
+
             for j, poly in enumerate(ideal):
                 p_len = len(poly)
                 batched_ideals[i, j, :p_len] = poly
                 batched_monomial_masks[i, j, :p_len] = True
-                
+
             if selectables:
                 rows, cols = zip(*selectables)
                 batched_selectables[i, rows, cols] = 0.0
-                
+
                 # Remap action index
                 r, c = divmod(actions[i], num_polys)
                 batched_actions.append(r * max_polys + c)
@@ -300,10 +346,14 @@ if __name__ == "__main__":
             "ideals": batched_ideals,
             "monomial_masks": batched_monomial_masks,
             "poly_masks": batched_poly_masks,
-            "selectables": batched_selectables
+            "selectables": batched_selectables,
         }
-        
-        return batched_obs, np.array(batched_actions, dtype=np.int32), np.array(loss_mask, dtype=np.float32)
+
+        return (
+            batched_obs,
+            np.array(batched_actions, dtype=np.int32),
+            np.array(loss_mask, dtype=np.float32),
+        )
 
     num_vars = 5
     multiple = 4.55
@@ -315,7 +365,7 @@ if __name__ == "__main__":
     actor_path = os.path.join("models", "imitation_policy.pth")
     critic_path = os.path.join("models", "imitation_critic.pth")
     device = "cpu"
-    
+
     num_epochs = 50
     batch_size = 128
     dataset_size = 2048
@@ -328,13 +378,15 @@ if __name__ == "__main__":
     polys_embedding_dim = 128
     ideal_depth = 4
     ideal_num_heads = 8
- 
+
     # Create JAX random keys
     key = jax.random.key(0)
     key, k_monomial, k_polynomial, k_ideal, k_scorer = jax.random.split(key, 5)
 
     # Build Equinox modules
-    monomial_embedder = MonomialEmbedder(monomials_dim, monoms_embedding_dim, k_monomial)
+    monomial_embedder = MonomialEmbedder(
+        monomials_dim, monoms_embedding_dim, k_monomial
+    )
     polynomial_embedder = PolynomialEmbedder(
         input_dim=monoms_embedding_dim,
         hidden_dim=polys_embedding_dim,
@@ -344,7 +396,9 @@ if __name__ == "__main__":
     )
     ideal_model = IdealModel(polys_embedding_dim, ideal_num_heads, ideal_depth, k_ideal)
     pairwise_scorer = PairwiseScorer(polys_embedding_dim, polys_embedding_dim, k_scorer)
-    extractor_eqx = Extractor(monomial_embedder, polynomial_embedder, ideal_model, pairwise_scorer)
+    extractor_eqx = Extractor(
+        monomial_embedder, polynomial_embedder, ideal_model, pairwise_scorer
+    )
     policy = GrobnerPolicy(extractor_eqx)
 
     optimizer = optax.nadam(3e-4)
@@ -354,22 +408,45 @@ if __name__ == "__main__":
 
     if not os.path.exists(data_path):
         generate_expert_data(env, dataset_size, data_path, expert_policy)
-    
+
     to_batch = Batch(batch_size, True, batch_fn)
     datasource = JsonDatasource(data_path, "states", "actions")
-    train_sampler = IndexSampler(len(datasource) , ShardOptions(0, 1, True), True, 1, seed=0)
+    train_sampler = IndexSampler(
+        len(datasource), ShardOptions(0, 1, True), True, 1, seed=0
+    )
     train_dataloader = DataLoader(
-        data_source=datasource, sampler=train_sampler, operations=(to_batch,), worker_count=1
+        data_source=datasource,
+        sampler=train_sampler,
+        operations=(to_batch,),
+        worker_count=1,
     )
-    val_sampler = IndexSampler(len(datasource), ShardOptions(0, 1, True), True, 1, seed=1)
+    val_sampler = IndexSampler(
+        len(datasource), ShardOptions(0, 1, True), True, 1, seed=1
+    )
     val_dataloader = DataLoader(
-        data_source=datasource, sampler=val_sampler, operations=(to_batch,), worker_count=1
+        data_source=datasource,
+        sampler=val_sampler,
+        operations=(to_batch,),
+        worker_count=1,
     )
 
+    model, losses_train, accuracy_train, losses_validation, accuracy_validation = (
+        train_model(
+            policy,
+            train_dataloader,
+            val_dataloader,
+            num_epochs,
+            optimizer,
+            loss_and_accuracy,
+            checkpoint_dir,
+            early_stopping_patience,
+            min_delta,
+        )
+    )
 
-    model, losses_train, accuracy_train, losses_validation, accuracy_validation = train_model(policy, train_dataloader, val_dataloader, num_epochs, optimizer, loss_and_accuracy, checkpoint_dir, early_stopping_patience, min_delta)
-
-    eval_policy_env = BuchbergerEnv(SAT3IdealGenerator(num_vars, num_clauses), mode="train")
+    eval_policy_env = BuchbergerEnv(
+        SAT3IdealGenerator(num_vars, num_clauses), mode="train"
+    )
     eval_expert_env = BuchbergerEnv(SAT3IdealGenerator(num_vars, num_clauses))
     eval_expert = BasicExpert(eval_expert_env)
     episodes = 100
