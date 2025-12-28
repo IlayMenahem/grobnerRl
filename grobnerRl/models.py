@@ -72,17 +72,18 @@ class PolynomialEmbedder(Module):
         for layer in self.phi_layers:
             h = jax.nn.relu(jax.vmap(layer)(h))
         
+        lm_emb = h[0]
         if mask is not None:
-            # Broadcast mask to (num_monomials, hidden_dim)
-            # Use a large negative number for masked values so max pooling ignores them
             h = jnp.where(mask[:, None], h, -jnp.inf)
 
         h_pooled = jnp.max(h, axis=0)
         h_pooled = jnp.where(jnp.isneginf(h_pooled), 0.0, h_pooled)
+        x = lm_emb + h_pooled
         
         for layer in self.rho_layers:
-            h_pooled = jax.nn.relu(layer(h_pooled))
-        return h_pooled
+            x = jax.nn.relu(layer(x))
+
+        return x
 
 
 class TransformerEncoderLayer(Module):
@@ -204,7 +205,6 @@ class PairwiseScorer(Module):
         pairwise_emb = embeddings[:, None, :] + embeddings[None, :, :]
 
         # Apply MLP
-        # We can use vmap to apply MLP over the N, N dimensions
         scores = jax.vmap(jax.vmap(self.mlp))(pairwise_emb)
 
         # scores is (N, N, 1), squeeze to (N, N)

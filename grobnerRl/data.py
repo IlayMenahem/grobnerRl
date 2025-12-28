@@ -18,12 +18,22 @@ from grobnerRl.types import Action, Observation
 
 
 class JsonDatasource(RandomAccessDataSource[tuple[Observation, Action]]):
-    def __init__(self, path: str, obs: str, labels: str):
+    def __init__(
+        self,
+        path: str,
+        obs: str,
+        labels: str,
+        indices: Sequence[int] | None = None,
+    ):
         with open(path, "r") as f:
             dataset = json.load(f)
 
         self.states = dataset[obs]
         self.actions = dataset[labels]
+
+        if indices is not None:
+            self.states = [self.states[int(i)] for i in indices]
+            self.actions = [self.actions[int(i)] for i in indices]
 
     def __len__(self):
         return len(self.states)

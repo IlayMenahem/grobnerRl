@@ -12,11 +12,12 @@ from grain.samplers import IndexSampler
 from grain.sharding import ShardOptions
 from grain.transforms import Batch
 from jaxtyping import Array
+from tqdm import tqdm
 
 from grobnerRl.data import JsonDatasource, generate_expert_data
 from grobnerRl.envs.env import BuchbergerEnv
 from grobnerRl.envs.ideals import SAT3IdealGenerator
-from grobnerRl.experts import BasicExpert
+from grobnerRl.experts import BasicExpert, LowestLMExpert
 from grobnerRl.models import (
     Extractor,
     GrobnerPolicy,
@@ -247,11 +248,12 @@ def evaluate_policy(
     Returns:
     - Tuple of numpy arrays with policy rewards and expert rewards per episode.
     """
+    pbar = tqdm(range(episodes), desc="Evaluating Policy")
 
     model_rewards: list[float] = []
     expert_rewards: list[float] = []
 
-    for episode in range(episodes):
+    for episode in pbar:
         obs, _ = policy_env.reset(seed=episode)
         ep_reward = 0.0
         done = False
@@ -362,28 +364,22 @@ if __name__ == "__main__":
     ideal_gen = SAT3IdealGenerator(num_vars, num_clauses)
     data_path = os.path.join("data", f"{ideal_dist}.json")
     checkpoint_dir = os.path.join("models", "checkpoints")
-    actor_path = os.path.join("models", "imitation_policy.pth")
-    critic_path = os.path.join("models", "imitation_critic.pth")
-    device = "cpu"
 
-    num_epochs = 50
+    num_epochs = 100
     batch_size = 128
-    dataset_size = 2048
-    early_stopping_patience = 1
+    dataset_size = 2**17
+    early_stopping_patience = 5
     min_delta = 1e-3
 
-    # init models
     monomials_dim = num_vars + 1
     monoms_embedding_dim = 64
     polys_embedding_dim = 128
     ideal_depth = 4
     ideal_num_heads = 8
 
-    # Create JAX random keys
     key = jax.random.key(0)
     key, k_monomial, k_polynomial, k_ideal, k_scorer = jax.random.split(key, 5)
 
-    # Build Equinox modules
     monomial_embedder = MonomialEmbedder(
         monomials_dim, monoms_embedding_dim, k_monomial
     )
@@ -401,33 +397,47 @@ if __name__ == "__main__":
     )
     policy = GrobnerPolicy(extractor_eqx)
 
-    optimizer = optax.nadam(3e-4)
+    learning_rate = 1e-4
+    optimizer = optax.nadam(learning_rate)
 
     env = BuchbergerEnv(ideal_gen)
-    expert_policy = BasicExpert(env)
+    expert_policy = LowestLMExpert(env)
 
     if not os.path.exists(data_path):
         generate_expert_data(env, dataset_size, data_path, expert_policy)
 
+    full_ds = JsonDatasource(data_path, "states", "actions")
+    indices = np.arange(len(full_ds))
+    split = int(0.8 * len(full_ds))
+    train_indices = indices[:split]
+    val_indices = indices[split:]
+
+    val_datasource = JsonDatasource(data_path, "states", "actions", indices=val_indices)
+    train_datasource = JsonDatasource(
+        data_path, "states", "actions", indices=train_indices
+    )
+
     to_batch = Batch(batch_size, True, batch_fn)
-    datasource = JsonDatasource(data_path, "states", "actions")
+
     train_sampler = IndexSampler(
-        len(datasource), ShardOptions(0, 1, True), True, 1, seed=0
+        len(train_datasource), ShardOptions(0, 1, True), True, 1, seed=0
     )
     train_dataloader = DataLoader(
-        data_source=datasource,
+        data_source=train_datasource,
         sampler=train_sampler,
         operations=(to_batch,),
         worker_count=1,
+        worker_buffer_size=4,
     )
     val_sampler = IndexSampler(
-        len(datasource), ShardOptions(0, 1, True), True, 1, seed=1
+        len(val_datasource), ShardOptions(0, 1, True), True, 1, seed=1
     )
     val_dataloader = DataLoader(
-        data_source=datasource,
+        data_source=val_datasource,
         sampler=val_sampler,
         operations=(to_batch,),
         worker_count=1,
+        worker_buffer_size=4,
     )
 
     model, losses_train, accuracy_train, losses_validation, accuracy_validation = (
@@ -448,7 +458,7 @@ if __name__ == "__main__":
         SAT3IdealGenerator(num_vars, num_clauses), mode="train"
     )
     eval_expert_env = BuchbergerEnv(SAT3IdealGenerator(num_vars, num_clauses))
-    eval_expert = BasicExpert(eval_expert_env)
+    eval_expert = LowestLMExpert(eval_expert_env)
     episodes = 100
 
     evaluate_policy(model, eval_policy_env, eval_expert_env, eval_expert, episodes)
