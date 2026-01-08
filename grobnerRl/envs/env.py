@@ -655,7 +655,7 @@ def buchberger(G: list[PolyElement]) -> tuple[list[PolyElement], dict]:
 
 
 def GVW_buchberger(
-    G: list[PolyElement],
+    G: Sequence[PolyElement],
 ) -> tuple[list[PolyElement], list[tuple[tuple[int, ...], int]]]:
     """
     Compute a Groebner basis using the GVW signature-based Buchberger algorithm with the g2 module order.

@@ -1,14 +1,16 @@
 from abc import ABC, abstractmethod
 from copy import copy
+from typing import Sequence
 
 import numpy as np
+from numpy.typing import ArrayLike
 from sympy.polys.rings import PolyElement
 
 from grobnerRl.envs.env import BaseEnv, GVW_buchberger, reduce, spoly
 
 
 def select(
-    G: list[PolyElement], P: list[tuple[int, int]], strategy="normal"
+    G: Sequence[PolyElement], P: Sequence[tuple[int, int]], strategy="normal"
 ) -> tuple[int, int]:
     """
     Select and return a pair from P, using the specified strategy.
@@ -95,7 +97,7 @@ class Expert(ABC):
 
 def next_step(
     env: BaseEnv, pair: int | tuple[int, int]
-) -> tuple[list[PolyElement], list[tuple[int, int]], BaseEnv]:
+) -> tuple[list[ArrayLike] | list[PolyElement], list[tuple[int, int]], BaseEnv]:
     """
     Compute the next step in the Buchberger process using the specified pair.
 
@@ -333,7 +335,7 @@ class ClosestLMExpert(BasisBasedExpert):
         best_pair = min(
             leading_monomial_by_pair.keys(),
             key=lambda pair: min(
-                distance(leading_monomial_by_pair[pair], lt)
+                distance(leading_monomial_by_pair[pair].LM, lt)
                 for lt in self.leading_terms
             ),
             default=P[0],

@@ -259,16 +259,16 @@ class Extractor(Module):
         padded_ideal = []
         masks = []
         for p in ideal_arrays:
-            l = p.shape[0]
-            pad_len = max_len - l
+            length = p.shape[0]
+            pad_len = max_len - length
             if pad_len > 0:
                 p_padded = jnp.pad(p, ((0, pad_len), (0, 0)), constant_values=0)
                 mask = jnp.concatenate(
-                    [jnp.ones(l, dtype=bool), jnp.zeros(pad_len, dtype=bool)]
+                    [jnp.ones(length, dtype=bool), jnp.zeros(pad_len, dtype=bool)]
                 )
             else:
                 p_padded = p
-                mask = jnp.ones(l, dtype=bool)
+                mask = jnp.ones(length, dtype=bool)
             padded_ideal.append(p_padded)
             masks.append(mask)
 

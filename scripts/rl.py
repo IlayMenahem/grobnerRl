@@ -2,7 +2,6 @@ import torch
 from grobnerRl.envs.deepgroebner import BuchbergerEnv
 from grobnerRl.models import Extractor, GrobnerPolicy, GrobnerCritic
 from implementations.ppo import train_ppo
-from implementations.a2c import train_a2c
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from grobnerRl.envs.env import BaseEnv, BuchbergerEnv, tokenize
 from grobnerRl.envs.ideals import SAT3IdealGenerator
-from grobnerRl.experts import BasicExpert, ClosestLMExpert, Expert
+from grobnerRl.experts import BasicExpert, Expert
 from grobnerRl.types import Action, Observation
 
 
