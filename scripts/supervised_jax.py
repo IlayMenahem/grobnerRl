@@ -17,7 +17,7 @@ from tqdm import tqdm
 from grobnerRl.data import JsonDatasource, generate_expert_data
 from grobnerRl.envs.env import BuchbergerEnv
 from grobnerRl.envs.ideals import SAT3IdealGenerator
-from grobnerRl.experts import BasicExpert, LowestLMExpert
+from grobnerRl.experts import BasicExpert, Expert
 from grobnerRl.models import (
     Extractor,
     GrobnerPolicy,
@@ -232,7 +232,7 @@ def evaluate_policy(
     policy: Module,
     policy_env: BuchbergerEnv,
     expert_env: BuchbergerEnv,
-    expert_agent: BasicExpert,
+    expert_agent: Expert,
     episodes: int = 100,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -242,7 +242,7 @@ def evaluate_policy(
     - policy (Module): Trained GrobnerPolicy.
     - policy_env (BuchbergerEnv): Environment configured with tokenized observations for the policy.
     - expert_env (BuchbergerEnv): Environment with symbolic observations for the expert.
-    - expert_agent (BasicExpert): Heuristic expert policy.
+    - expert_agent (Expert): Heuristic expert policy.
     - episodes (int): Number of evaluation episodes.
 
     Returns:
@@ -367,7 +367,7 @@ if __name__ == "__main__":
 
     num_epochs = 100
     batch_size = 128
-    dataset_size = 2**17
+    dataset_size = 2**15
     early_stopping_patience = 5
     min_delta = 1e-3
 
@@ -401,7 +401,7 @@ if __name__ == "__main__":
     optimizer = optax.nadam(learning_rate)
 
     env = BuchbergerEnv(ideal_gen)
-    expert_policy = LowestLMExpert(env)
+    expert_policy = BasicExpert(env)
 
     if not os.path.exists(data_path):
         generate_expert_data(env, dataset_size, data_path, expert_policy)
@@ -458,7 +458,7 @@ if __name__ == "__main__":
         SAT3IdealGenerator(num_vars, num_clauses), mode="train"
     )
     eval_expert_env = BuchbergerEnv(SAT3IdealGenerator(num_vars, num_clauses))
-    eval_expert = LowestLMExpert(eval_expert_env)
+    eval_expert = BasicExpert(eval_expert_env)
     episodes = 100
 
     evaluate_policy(model, eval_policy_env, eval_expert_env, eval_expert, episodes)
