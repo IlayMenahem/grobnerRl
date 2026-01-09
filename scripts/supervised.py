@@ -1,424 +1,464 @@
 import os
+from typing import Callable, Sequence
 
+import equinox as eqx
+import jax
+import jax.numpy as jnp
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-from implementations.utils import plot_learning_process
-from torch.utils.data import DataLoader
+import optax
+from equinox import Module
+from grain import DataLoader
+from grain.samplers import IndexSampler
+from grain.sharding import ShardOptions
+from grain.transforms import Batch
+from jaxtyping import Array
 from tqdm import tqdm
 
-from grobnerRl.data import JsonDataset, collate, generate_expert_data
-from grobnerRl.envs.deepgroebner import BuchbergerAgent, BuchbergerEnv
+from grobnerRl.data import JsonDatasource, generate_expert_data
+from grobnerRl.envs.env import BuchbergerEnv
 from grobnerRl.envs.ideals import SAT3IdealGenerator
-from grobnerRl.models import Extractor, GrobnerCritic, GrobnerPolicy
+from grobnerRl.experts import BasicExpert, Expert
+from grobnerRl.models import (
+    Extractor,
+    GrobnerPolicy,
+    IdealModel,
+    MonomialEmbedder,
+    PairwiseScorer,
+    PolynomialEmbedder,
+)
+from grobnerRl.types import Action, Observation
 
 
-def bc_accuracy_and_loss(model, data, labels):
-    logits_list = model(data)
-
-    device = logits_list[0].device
-    labels = labels.to(device)
-    padded_logits = torch.nn.utils.rnn.pad_sequence(logits_list, batch_first=True).to(
-        device
-    )
-
-    loss = F.cross_entropy(padded_logits, labels)
-
-    with torch.no_grad():
-        predictions = torch.argmax(padded_logits, dim=-1)
-        correct = (predictions == labels).float().sum()
-        accuracy = correct / len(logits_list)
-
-    return loss, accuracy
-
-
-def value_accuracy_and_loss(model, data, returns):
-    preds = model(data).view(-1)
-    targets = returns.to(preds.device).float().view(-1)
-
-    loss = F.huber_loss(preds, targets)
-
-    with torch.no_grad():
-        accuracy = -F.l1_loss(preds, targets)
-
-    return loss, accuracy
+def save_checkpoint(
+    model: Module,
+    opt_state: optax.OptState,
+    checkpoint_dir: str,
+    label: str,
+    epoch: int,
+    val_accuracy: float,
+) -> str:
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    ckpt_path = os.path.join(checkpoint_dir, f"{label}.eqx")
+    payload = {
+        "model": model,
+        "opt_state": opt_state,
+        "epoch": epoch,
+        "val_accuracy": val_accuracy,
+    }
+    with open(ckpt_path, "wb") as f:
+        eqx.tree_serialise_leaves(f, payload)
+    return ckpt_path
 
 
-def train_epoch_nested(
-    dataloader, loss_and_accuracy_fn, model, optimizer, epoch_progressbar, device
-):
-    """Custom training epoch that handles nested tensor batches."""
-    model.train()
-    epoch_losses = []
-    epoch_accuracies = []
+def train_model(
+    policy: Module,
+    dataloader_train: DataLoader,
+    dataloader_validation: DataLoader,
+    num_epochs: int,
+    optimizer: optax.GradientTransformation,
+    loss_and_accuracy: Callable,
+    checkpoint_dir: str | None = None,
+    early_stopping_patience: int | None = None,
+    min_delta: float = 0.0,
+) -> tuple[Module, Array, Array, Array, Array]:
+    """
+    Train the model using supervised learning.
 
-    for data, labels in dataloader:
-        # data is a tuple of (nested_batch, selectables_batch)
-        # We don't move data to device here since nested tensors need special handling
-        labels = labels.to(device, non_blocking=True)
+    Args:
+    - policy (Module): The GrobnerPolicy model to be trained.
+    - dataloader_train (DataLoader): DataLoader for training data.
+    - dataloader_validation (DataLoader): DataLoader for validation data.
+    - num_epochs (int): Number of epochs to train.
+    - optimizer (optax.GradientTransformation): Optax optimizer.
+    - loss_and_accuracy (Callable): Function to compute loss and accuracy.
+    - checkpoint_dir (str | None): Directory to save checkpoints. If None, no checkpoints are written.
+    - early_stopping_patience (int | None): Stop if validation accuracy does not improve for this many epochs. If None, early stopping is disabled.
+    - min_delta (float): Minimum improvement in validation accuracy to reset the early-stopping counter.
 
-        loss, accuracy = loss_and_accuracy_fn(model, data, labels)
+    Returns:
+    - Trained model (Module).
+    - Training losses (Array).
+    - Training accuracies (Array).
+    - Validation losses (Array).
+    - Validation accuracies (Array).
+    """
+    opt_state = optimizer.init(eqx.filter(policy, eqx.is_array))
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+    @eqx.filter_jit
+    def make_step(
+        model: Module,
+        opt_state: optax.OptState,
+        observations: dict,
+        actions: Array,
+        loss_mask: Array,
+    ) -> tuple[Module, optax.OptState, Array, Array]:
+        def loss_fn(m):
+            loss, acc = loss_and_accuracy(m, observations, actions, loss_mask)
+            return loss, acc
 
-        epoch_losses.append(loss.item())
-        epoch_accuracies.append(
-            accuracy.item() if torch.is_tensor(accuracy) else accuracy
+        (loss, acc), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(model)
+        updates, opt_state = optimizer.update(grads, opt_state, model)
+        model = eqx.apply_updates(model, updates)
+        return model, opt_state, loss, acc
+
+    @eqx.filter_jit
+    def eval_step(
+        model: Module, observations: dict, actions: Array, loss_mask: Array
+    ) -> tuple[Array, Array]:
+        loss, acc = loss_and_accuracy(model, observations, actions, loss_mask)
+        return loss, acc
+
+    def train_epoch(
+        policy: Module, opt_state: optax.OptState
+    ) -> tuple[Module, optax.OptState, Array, Array]:
+        epoch_losses = []
+        epoch_accs = []
+
+        for observations, actions, loss_mask in dataloader_train:
+            policy, opt_state, loss, acc = make_step(
+                policy, opt_state, observations, actions, loss_mask
+            )
+            epoch_losses.append(loss)
+            epoch_accs.append(acc)
+
+        loss = jnp.mean(jnp.array(epoch_losses))
+        accuracy = jnp.mean(jnp.array(epoch_accs))
+
+        return policy, opt_state, loss, accuracy
+
+    def validate_epoch(policy: Module) -> tuple[Array, Array]:
+        epoch_losses = []
+        epoch_accs = []
+
+        for observations, actions, loss_mask in dataloader_validation:
+            loss, acc = eval_step(policy, observations, actions, loss_mask)
+            epoch_losses.append(loss)
+            epoch_accs.append(acc)
+
+        loss = jnp.mean(jnp.array(epoch_losses))
+        accuracy = jnp.mean(jnp.array(epoch_accs))
+
+        return loss, accuracy
+
+    train_losses: list[Array] = []
+    train_accuracies: list[Array] = []
+    val_losses: list[Array] = []
+    val_accuracies: list[Array] = []
+    best_val_acc = float("-inf")
+    no_improve_epochs = 0
+
+    for epoch in range(num_epochs):
+        policy, opt_state, t_loss, t_acc = train_epoch(policy, opt_state)
+        v_loss, v_acc = validate_epoch(policy)
+
+        train_losses.append(t_loss)
+        train_accuracies.append(t_acc)
+        val_losses.append(v_loss)
+        val_accuracies.append(v_acc)
+
+        val_acc_value = float(v_acc)
+        print(
+            f"Epoch {epoch + 1}/{num_epochs}, "
+            f"Train Loss: {float(t_loss):.4f}, Train Acc: {float(t_acc):.4f}, "
+            f"Val Loss: {float(v_loss):.4f}, Val Acc: {val_acc_value:.4f}"
         )
-        epoch_progressbar.update(1)
-        epoch_progressbar.set_postfix(loss=f"{loss.item():.4f}")
 
-    avg_epoch_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0
-    avg_epoch_accuracy = float(np.mean(epoch_accuracies)) if epoch_accuracies else 0.0
+        improved = val_acc_value > best_val_acc + min_delta
+        if improved:
+            best_val_acc = val_acc_value
+            no_improve_epochs = 0
+        else:
+            no_improve_epochs += 1
 
-    return avg_epoch_loss, avg_epoch_accuracy
-
-
-def validate_epoch_nested(dataloader, loss_and_accuracy_fn, model, device):
-    """Custom validation epoch that handles nested tensor batches."""
-    model.eval()
-    epoch_losses = []
-    epoch_accuracies = []
-
-    with torch.no_grad():
-        for data, labels in dataloader:
-            labels = labels.to(device, non_blocking=True)
-            loss, accuracy = loss_and_accuracy_fn(model, data, labels)
-            epoch_losses.append(loss.item())
-            epoch_accuracies.append(
-                accuracy.item() if torch.is_tensor(accuracy) else accuracy
+        if checkpoint_dir:
+            save_checkpoint(
+                policy, opt_state, checkpoint_dir, "last", epoch + 1, val_acc_value
             )
 
-    avg_epoch_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0
-    avg_epoch_accuracy = float(np.mean(epoch_accuracies)) if epoch_accuracies else 0.0
+            if improved:
+                save_checkpoint(
+                    policy, opt_state, checkpoint_dir, "best", epoch + 1, val_acc_value
+                )
 
-    return avg_epoch_loss, avg_epoch_accuracy
+        if (
+            early_stopping_patience is not None
+            and no_improve_epochs >= early_stopping_patience
+        ):
+            print(
+                f"Early stopping at epoch {epoch + 1} (no val accuracy improvement > {min_delta} for {early_stopping_patience} epochs)."
+            )
+            break
 
-
-def train_model_nested(
-    model,
-    train_loader,
-    val_loader,
-    epochs,
-    optimizer,
-    loss_and_accuracy_fn,
-    device="cpu",
-    scheduler=None,
-    early_stopping_patience=None,
-    early_stopping_min_delta=0.0,
-):
-    """Custom training loop that handles nested tensor batches."""
-    losses_train = []
-    accuracy_train = []
-    losses_validation = []
-    accuracy_validation = []
-
-    best_val_loss = float("inf")
-    patience_counter = 0
-
-    epoch_progressbar = tqdm(
-        total=len(train_loader), desc="Training", unit="batch", leave=False
+    return (
+        policy,
+        jnp.stack(train_losses),
+        jnp.stack(train_accuracies),
+        jnp.stack(val_losses),
+        jnp.stack(val_accuracies),
     )
 
-    for epoch in range(epochs):
-        epoch_progressbar.reset()
-        epoch_progressbar.set_description(f"Epoch {epoch + 1}/{epochs}")
 
-        # Training
-        train_loss, train_acc = train_epoch_nested(
-            train_loader,
-            loss_and_accuracy_fn,
-            model,
-            optimizer,
-            epoch_progressbar,
-            device,
-        )
-        losses_train.append(train_loss)
-        accuracy_train.append(train_acc)
-
-        # Validation
-        val_loss, val_acc = validate_epoch_nested(
-            val_loader, loss_and_accuracy_fn, model, device
-        )
-        losses_validation.append(val_loss)
-        accuracy_validation.append(val_acc)
-
-        print(
-            f"Epoch {epoch + 1}/{epochs} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}"
-        )
-
-        # Learning rate scheduling
-        if scheduler is not None:
-            scheduler.step(val_loss)
-
-        # Early stopping
-        if early_stopping_patience is not None:
-            if val_loss < best_val_loss - early_stopping_min_delta:
-                best_val_loss = val_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= early_stopping_patience:
-                    print(f"Early stopping triggered at epoch {epoch + 1}")
-                    break
-
-    epoch_progressbar.close()
-
-    return model, losses_train, accuracy_train, losses_validation, accuracy_validation
-
-
-class ModelAdapter(nn.Module):
+def loss_and_accuracy(
+    model: Module, observations: dict, actions: Array, loss_mask: Array
+) -> tuple[Array, Array]:
     """
-    Adapter class to allow the models defined in grobnerRl.models to be used with BuchbergerEnv.
+    Compute the loss and accuracy for the given model on the provided observations and actions.
+
+    Args:
+    - model (Module): The GrobnerPolicy model.
+    - observations (dict): A batch of observations (padded).
+    - actions (Array): A batch of actions.
+    - loss_mask (Array): A batch of loss masks (1.0 for valid, 0.0 for invalid).
+
+    Returns:
+    - loss (Array): The computed loss.
+    - accuracy (Array): The computed accuracy.
     """
+    logits = eqx.filter_vmap(model)(observations)
 
-    def __init__(self, model, device: str | torch.device | None = None):
-        super(ModelAdapter, self).__init__()
-        self.model = model
-        self.device = (
-            torch.device(device)
-            if device is not None
-            else next(model.parameters()).device
-        )
+    per_sample_loss = optax.softmax_cross_entropy_with_integer_labels(logits, actions)
 
-    def forward(self, obs):
-        prepared_obs = self._prepare_observation(obs)
-        output = self.model(prepared_obs)
+    # Apply mask
+    loss = (per_sample_loss * loss_mask).sum() / (loss_mask.sum() + 1e-9)
 
-        if isinstance(output, list) and len(output) == 1:
-            return output[0]
+    predicted_actions = jnp.argmax(logits, axis=-1)
+    correct = (predicted_actions == actions) * loss_mask
+    accuracy = correct.sum() / (loss_mask.sum() + 1e-9)
 
-        return output
-
-    def _prepare_observation(self, obs):
-        if not isinstance(obs, tuple) or len(obs) != 2:
-            raise ValueError("Observation must be a tuple of (ideal, selectables).")
-
-        nested_batch, selectables_batch = obs
-
-        if self._is_prepared(nested_batch):
-            nested_batch = [tensor.to(self.device) for tensor in nested_batch]
-            return (nested_batch, selectables_batch)
-
-        if isinstance(nested_batch, list):
-            return self._prepare_single_state(obs)
-
-        raise ValueError("Unsupported observation format for ModelAdapter.")
-
-    def _prepare_single_state(self, state):
-        ideal, selectables = state
-
-        poly_tensors = []
-        for poly in ideal:
-            if torch.is_tensor(poly):
-                poly_tensor = poly.to(self.device)
-            else:
-                poly_array = np.array(poly, dtype=np.float32)
-                poly_tensor = torch.as_tensor(
-                    poly_array, dtype=torch.float32, device=self.device
-                )
-            poly_tensors.append(poly_tensor)
-
-        nested_ideal = torch.nested.nested_tensor(poly_tensors, layout=torch.jagged).to(
-            self.device
-        )
-        selectables_list = [tuple(int(idx) for idx in pair) for pair in selectables]
-
-        return ([nested_ideal], [selectables_list])
-
-    @staticmethod
-    def _is_prepared(nested_batch):
-        return (
-            isinstance(nested_batch, list)
-            and len(nested_batch) > 0
-            and torch.is_tensor(nested_batch[0])
-        )
+    return loss, accuracy
 
 
-def evaluate_policy(model, actor_path, env, model_env, device, expert_agent):
-    """Evaluate trained policy against expert agent performance."""
+def evaluate_policy(
+    policy: Module,
+    policy_env: BuchbergerEnv,
+    expert_env: BuchbergerEnv,
+    expert_agent: Expert,
+    episodes: int = 100,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Roll out the trained policy and compare it to an expert agent.
 
-    model.load_state_dict(torch.load(actor_path, map_location=device))
-    model.eval()
-    policy_adapter = ModelAdapter(model, device=device)
-    policy_adapter.eval()
+    Args:
+    - policy (Module): Trained GrobnerPolicy.
+    - policy_env (BuchbergerEnv): Environment configured with tokenized observations for the policy.
+    - expert_env (BuchbergerEnv): Environment with symbolic observations for the expert.
+    - expert_agent (Expert): Heuristic expert policy.
+    - episodes (int): Number of evaluation episodes.
 
-    model_rewards, expert_rewards = [], []
+    Returns:
+    - Tuple of numpy arrays with policy rewards and expert rewards per episode.
+    """
+    pbar = tqdm(range(episodes), desc="Evaluating Policy")
 
-    for episode in tqdm(range(250), desc="Evaluating policy"):
-        obs, _ = model_env.reset(seed=episode)
-        episode_reward, episode_done = 0, False
+    model_rewards: list[float] = []
+    expert_rewards: list[float] = []
 
-        while not episode_done:
-            with torch.no_grad():
-                logits = policy_adapter(obs)
-                action = int(torch.argmax(logits).item())
+    for episode in pbar:
+        obs, _ = policy_env.reset(seed=episode)
+        ep_reward = 0.0
+        done = False
 
-            obs, reward, terminated, truncated, _ = model_env.step(action)
-            episode_reward += reward
-            episode_done = terminated or truncated
+        while not done:
+            logits = policy(obs)
+            action = int(jnp.argmax(logits))
 
-        model_rewards.append(episode_reward)
+            obs, reward, terminated, truncated, _ = policy_env.step(action)
+            ep_reward += float(reward)
+            done = terminated or truncated
 
-        obs, _ = env.reset(seed=episode)
-        episode_reward, episode_done = 0, False
+        model_rewards.append(ep_reward)
 
-        while not episode_done:
-            # In 'eval' mode, obs is the raw state (G, P), not tokenized
-            expert_action = expert_agent.act(obs)
-            obs, reward, terminated, truncated, _ = env.step(expert_action)
-            episode_reward += reward
-            episode_done = terminated or truncated
+        obs_exp, _ = expert_env.reset(seed=episode)
+        exp_reward = 0.0
+        done = False
 
-        expert_rewards.append(episode_reward)
+        while not done:
+            expert_action = expert_agent(obs_exp)
+            obs_exp, reward, terminated, truncated, _ = expert_env.step(expert_action)
+            exp_reward += float(reward)
+            done = terminated or truncated
 
-    # Print evaluation results
-    model_mean_reward = torch.tensor(model_rewards).mean().item()
-    expert_mean_reward = torch.tensor(expert_rewards).mean().item()
-    performance_ratio = model_mean_reward / expert_mean_reward
+        expert_rewards.append(exp_reward)
+
+    model_mean = float(np.mean(model_rewards))
+    expert_mean = float(np.mean(expert_rewards))
+    ratio = model_mean / expert_mean
 
     print(
-        f"Evaluation complete - Policy reward: {model_mean_reward:.4f}, Expert reward: {expert_mean_reward:.4f}, Performance ratio: {performance_ratio:.4f}"
+        f"Evaluation complete - Policy reward: {model_mean:.4f}, "
+        f"Expert reward: {expert_mean:.4f}, Performance ratio: {ratio:.4f}"
     )
 
-    return model_rewards, expert_rewards
+    return np.array(model_rewards, dtype=np.float32), np.array(
+        expert_rewards, dtype=np.float32
+    )
 
 
 if __name__ == "__main__":
-    torch.manual_seed(42)
-    num_vars = 3
-    num_clauses = 10
-    max_degree = 4
-    num_polys = 4
-    coeff_field = 37
-    length_lambda = 0.5
+
+    def batch_fn(
+        x: Sequence[tuple[Observation, Action]],
+    ) -> tuple[dict, np.ndarray, np.ndarray]:
+        observations, actions = zip(*x)
+        batch_size = len(observations)
+
+        # 1. Calculate dimensions
+        max_polys = max(len(obs[0]) for obs in observations)
+        max_monoms = max(max(len(p) for p in obs[0]) for obs in observations)
+        num_vars = len(observations[0][0][0][0])
+
+        # 2. Allocate buffers
+        batched_ideals = np.zeros(
+            (batch_size, max_polys, max_monoms, num_vars), dtype=np.float32
+        )
+        batched_monomial_masks = np.zeros(
+            (batch_size, max_polys, max_monoms), dtype=bool
+        )
+        batched_poly_masks = np.zeros((batch_size, max_polys), dtype=bool)
+        batched_selectables = np.full(
+            (batch_size, max_polys, max_polys), -np.inf, dtype=np.float32
+        )
+
+        batched_actions = []
+        loss_mask = []
+
+        for i, (ideal, selectables) in enumerate(observations):
+            num_polys = len(ideal)
+            batched_poly_masks[i, :num_polys] = True
+
+            for j, poly in enumerate(ideal):
+                p_len = len(poly)
+                batched_ideals[i, j, :p_len] = poly
+                batched_monomial_masks[i, j, :p_len] = True
+
+            if selectables:
+                rows, cols = zip(*selectables)
+                batched_selectables[i, rows, cols] = 0.0
+
+                # Remap action index
+                r, c = divmod(actions[i], num_polys)
+                batched_actions.append(r * max_polys + c)
+                loss_mask.append(1.0)
+            else:
+                batched_selectables[i, 0, 0] = 0.0
+                batched_actions.append(0)
+                loss_mask.append(0.0)
+
+        batched_obs = {
+            "ideals": batched_ideals,
+            "monomial_masks": batched_monomial_masks,
+            "poly_masks": batched_poly_masks,
+            "selectables": batched_selectables,
+        }
+
+        return (
+            batched_obs,
+            np.array(batched_actions, dtype=np.int32),
+            np.array(loss_mask, dtype=np.float32),
+        )
+
+    num_vars = 5
+    multiple = 4.55
+    num_clauses = int(num_vars * multiple)
     ideal_dist = f"{num_vars}-{num_clauses}_sat3"
     ideal_gen = SAT3IdealGenerator(num_vars, num_clauses)
-    device = "cpu"
     data_path = os.path.join("data", f"{ideal_dist}.json")
-    actor_path = os.path.join("models", "imitation_policy.pth")
-    critic_path = os.path.join("models", "imitation_critic.pth")
+    checkpoint_dir = os.path.join("models", "checkpoints")
 
+    num_epochs = 100
+    batch_size = 128
+    dataset_size = 2**15
+    early_stopping_patience = 5
+    min_delta = 1e-3
+
+    monomials_dim = num_vars + 1
     monoms_embedding_dim = 64
     polys_embedding_dim = 128
     ideal_depth = 4
-    ideal_num_heads = 4
-    extractor_params = (
-        num_vars + 1,
-        monoms_embedding_dim,
-        polys_embedding_dim,
-        ideal_depth,
-        ideal_num_heads,
+    ideal_num_heads = 8
+
+    key = jax.random.key(0)
+    key, k_monomial, k_polynomial, k_ideal, k_scorer = jax.random.split(key, 5)
+
+    monomial_embedder = MonomialEmbedder(
+        monomials_dim, monoms_embedding_dim, k_monomial
     )
-    lr = 1e-4
-    gamma = 0.99
+    polynomial_embedder = PolynomialEmbedder(
+        input_dim=monoms_embedding_dim,
+        hidden_dim=polys_embedding_dim,
+        hidden_layers=2,
+        output_dim=polys_embedding_dim,
+        key=k_polynomial,
+    )
+    ideal_model = IdealModel(polys_embedding_dim, ideal_num_heads, ideal_depth, k_ideal)
+    pairwise_scorer = PairwiseScorer(polys_embedding_dim, polys_embedding_dim, k_scorer)
+    extractor_eqx = Extractor(
+        monomial_embedder, polynomial_embedder, ideal_model, pairwise_scorer
+    )
+    policy = GrobnerPolicy(extractor_eqx)
 
-    dataset_size = int(1e5)
-    batch_size = 32
-    num_workers = 2
-    epochs = 250
+    learning_rate = 1e-4
+    optimizer = optax.nadam(learning_rate)
 
-    model = GrobnerPolicy(Extractor(*extractor_params))
-    critic = GrobnerCritic(Extractor(*extractor_params))
-    model.to(device)
-    critic.to(device)
-
-    env = BuchbergerEnv(ideal_gen, mode="train")
-    expert_agent = BuchbergerAgent("degree_after_reduce")
-
-    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model has {num_params:,} trainable parameters.")
+    env = BuchbergerEnv(ideal_gen)
+    expert_policy = BasicExpert(env)
 
     if not os.path.exists(data_path):
-        generate_expert_data(env, dataset_size, data_path, expert_agent)
+        generate_expert_data(env, dataset_size, data_path, expert_policy)
 
-    dataset = JsonDataset(data_path, "states", "actions")
-    critic_dataset = JsonDataset(data_path, "states", "values")
-    split = [0.9, 0.1]
-    train_dataset, val_dataset = torch.utils.data.random_split(dataset, split)
-    critic_train_dataset, critic_val_dataset = torch.utils.data.random_split(
-        critic_dataset, split
-    )
+    full_ds = JsonDatasource(data_path, "states", "actions")
+    indices = np.arange(len(full_ds))
+    split = int(0.8 * len(full_ds))
+    train_indices = indices[:split]
+    val_indices = indices[split:]
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size,
-        shuffle=True,
-        collate_fn=collate,
-        num_workers=num_workers,
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size, collate_fn=collate, num_workers=num_workers
-    )
-    critic_train_loader = DataLoader(
-        critic_train_dataset,
-        batch_size,
-        shuffle=True,
-        collate_fn=collate,
-        num_workers=num_workers,
-    )
-    critic_val_loader = DataLoader(
-        critic_val_dataset, batch_size, collate_fn=collate, num_workers=num_workers
+    val_datasource = JsonDatasource(data_path, "states", "actions", indices=val_indices)
+    train_datasource = JsonDatasource(
+        data_path, "states", "actions", indices=train_indices
     )
 
-    optimizer = optim.Adam(model.parameters(), lr)
-    critic_optimizer = optim.Adam(critic.parameters(), lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
-    critic_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        critic_optimizer, patience=5, factor=0.5
+    to_batch = Batch(batch_size, True, batch_fn)
+
+    train_sampler = IndexSampler(
+        len(train_datasource), ShardOptions(0, 1, True), True, 1, seed=0
+    )
+    train_dataloader = DataLoader(
+        data_source=train_datasource,
+        sampler=train_sampler,
+        operations=(to_batch,),
+        worker_count=1,
+        worker_buffer_size=4,
+    )
+    val_sampler = IndexSampler(
+        len(val_datasource), ShardOptions(0, 1, True), True, 1, seed=1
+    )
+    val_dataloader = DataLoader(
+        data_source=val_datasource,
+        sampler=val_sampler,
+        operations=(to_batch,),
+        worker_count=1,
+        worker_buffer_size=4,
     )
 
     model, losses_train, accuracy_train, losses_validation, accuracy_validation = (
-        train_model_nested(
-            model,
-            train_loader,
-            val_loader,
-            epochs,
+        train_model(
+            policy,
+            train_dataloader,
+            val_dataloader,
+            num_epochs,
             optimizer,
-            bc_accuracy_and_loss,
-            device=device,
-            scheduler=scheduler,
-            early_stopping_patience=50,
-            early_stopping_min_delta=0.001,
+            loss_and_accuracy,
+            checkpoint_dir,
+            early_stopping_patience,
+            min_delta,
         )
     )
-    plot_learning_process(
-        losses_train, losses_validation, accuracy_train, accuracy_validation
-    )
-    os.makedirs(os.path.dirname(actor_path), exist_ok=True)
-    torch.save(model.state_dict(), actor_path)
 
-    env = BuchbergerEnv(ideal_gen)
-    expert_agent = BuchbergerAgent("degree_after_reduce")
-    model_env = BuchbergerEnv(ideal_gen, mode="train")
-    model_rewards, expert_rewards = evaluate_policy(
-        model, actor_path, env, model_env, device, expert_agent
+    eval_policy_env = BuchbergerEnv(
+        SAT3IdealGenerator(num_vars, num_clauses), mode="train"
     )
+    eval_expert_env = BuchbergerEnv(SAT3IdealGenerator(num_vars, num_clauses))
+    eval_expert = BasicExpert(eval_expert_env)
+    episodes = 100
 
-    (
-        critic_model,
-        losses_train,
-        accuracy_train,
-        losses_validation,
-        accuracy_validation,
-    ) = train_model_nested(
-        critic,
-        critic_train_loader,
-        critic_val_loader,
-        epochs,
-        critic_optimizer,
-        value_accuracy_and_loss,
-        device=device,
-        scheduler=critic_scheduler,
-        early_stopping_patience=50,
-        early_stopping_min_delta=0.001,
-    )
-    plot_learning_process(
-        losses_train, losses_validation, accuracy_train, accuracy_validation
-    )
-    os.makedirs(os.path.dirname(critic_path), exist_ok=True)
-    torch.save(critic_model.state_dict(), critic_path)
+    evaluate_policy(model, eval_policy_env, eval_expert_env, eval_expert, episodes)
