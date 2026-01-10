@@ -27,8 +27,15 @@ from grobnerRl.models import (
     MonomialEmbedder,
     PairwiseScorer,
     PolynomialEmbedder,
+    GrobnerPolicyValue,
 )
-from grobnerRl.types import Observation
+from grobnerRl.training.shared import (
+    Experience,
+    ReplayBuffer,
+    TrainConfig,
+    evaluate_model,
+    train_policy_value,
+)
 from grobnerRl.training.utils import load_checkpoint, save_checkpoint
 
 
@@ -97,215 +104,8 @@ def load_pretrained_policy(
 
 
 
-@dataclass
-class ModelConfig:
-    """Configuration for model architecture."""
-
-    monomials_dim: int
-    monoms_embedding_dim: int = 64
-    polys_embedding_dim: int = 128
-    ideal_depth: int = 4
-    ideal_num_heads: int = 8
-    value_hidden_dim: int = 128
 
 
-class GrobnerAlphaZero(Module):
-    """
-    AlphaZero-style model with shared backbone for policy and value.
-
-    The policy head outputs logits over all possible (i, j) pair actions.
-    The value head outputs a scalar estimate of expected return.
-    """
-
-    extractor: Extractor
-    value_head: eqx.nn.MLP
-
-    def __init__(self, extractor: Extractor, value_head: eqx.nn.MLP):
-        self.extractor = extractor
-        self.value_head = value_head
-
-    def __call__(self, obs: Observation | dict | tuple) -> tuple[Array, Array]:
-        """
-        Forward pass returning both policy logits and value estimate.
-
-        Args:
-            obs: Observation from the environment (tuple or dict format).
-
-        Returns:
-            Tuple of (policy_logits, value):
-                - policy_logits: Flattened logits over (i, j) pairs
-                - value: Scalar value estimate
-        """
-        # Get policy logits from extractor (same as GrobnerPolicy)
-        policy_logits = self.extractor(obs)
-
-        # Get value from pooling ideal embeddings
-        # We need to compute the intermediate embeddings
-        if isinstance(obs, dict):
-            ideal_stacked = obs["ideals"]
-            masks_stacked = obs["monomial_masks"]
-            poly_mask = obs["poly_masks"]
-
-            monomial_embs = jax.vmap(self.extractor.monomial_embedder)(ideal_stacked)
-            ideal_embeddings = jax.vmap(self.extractor.polynomial_embedder)(
-                monomial_embs, masks_stacked
-            )
-            ideal_embeddings = self.extractor.ideal_model(
-                ideal_embeddings, mask=poly_mask
-            )
-
-            # Mean pooling over valid polynomials for value
-            masked_embs = jnp.where(poly_mask[:, None], ideal_embeddings, 0.0)
-            pooled = masked_embs.sum(axis=0) / (poly_mask.sum() + 1e-9)
-        else:
-            ideal, selectables = obs
-
-            # Pad and embed (similar to Extractor)
-            ideal_arrays = [jnp.asarray(p) for p in ideal]
-            lengths = [p.shape[0] for p in ideal_arrays]
-            max_len = max(lengths) if lengths else 1
-
-            padded_ideal = []
-            masks = []
-            for p in ideal_arrays:
-                length = p.shape[0]
-                pad_len = max_len - length
-                if pad_len > 0:
-                    p_padded = jnp.pad(p, ((0, pad_len), (0, 0)), constant_values=0)
-                    mask = jnp.concatenate(
-                        [jnp.ones(length, dtype=bool), jnp.zeros(pad_len, dtype=bool)]
-                    )
-                else:
-                    p_padded = p
-                    mask = jnp.ones(length, dtype=bool)
-                padded_ideal.append(p_padded)
-                masks.append(mask)
-
-            ideal_stacked = jnp.stack(padded_ideal)
-            masks_stacked = jnp.stack(masks)
-
-            monomial_embs = jax.vmap(self.extractor.monomial_embedder)(ideal_stacked)
-            ideal_embeddings = jax.vmap(self.extractor.polynomial_embedder)(
-                monomial_embs, masks_stacked
-            )
-
-            poly_mask = jnp.ones(ideal_embeddings.shape[0], dtype=bool)
-            ideal_embeddings = self.extractor.ideal_model(
-                ideal_embeddings, mask=poly_mask
-            )
-
-            # Mean pooling for value
-            pooled = ideal_embeddings.mean(axis=0)
-
-        # Value head
-        value = self.value_head(pooled).squeeze(-1)
-
-        return policy_logits, value
-
-    @classmethod
-    def from_pretrained(
-        cls,
-        checkpoint_path: str,
-        config: ModelConfig,
-        optimizer: optax.GradientTransformation,
-        key: Array,
-    ) -> "GrobnerAlphaZero":
-        """
-        Initialize from a pretrained GrobnerPolicy checkpoint.
-
-        Loads the Extractor weights from supervised training and
-        initializes a fresh value head.
-
-        Args:
-            checkpoint_path: Path to supervised training checkpoint.
-            config: Model configuration.
-            optimizer: Optimizer for creating template opt_state.
-            key: JAX random key.
-
-        Returns:
-            GrobnerAlphaZero with pretrained policy weights.
-        """
-        key, k_value, k_load = jax.random.split(key, 3)
-
-        # Load pretrained policy
-        pretrained_policy = load_pretrained_policy(
-            checkpoint_path=checkpoint_path,
-            monomials_dim=config.monomials_dim,
-            monoms_embedding_dim=config.monoms_embedding_dim,
-            polys_embedding_dim=config.polys_embedding_dim,
-            ideal_depth=config.ideal_depth,
-            ideal_num_heads=config.ideal_num_heads,
-            optimizer=optimizer,
-            key=k_load,
-        )
-
-        # Extract the shared backbone
-        extractor = pretrained_policy.extractor
-
-        # Create fresh value head
-        value_head = eqx.nn.MLP(
-            in_size=config.polys_embedding_dim,
-            out_size=1,
-            width_size=config.value_hidden_dim,
-            depth=2,
-            activation=jax.nn.relu,
-            key=k_value,
-        )
-
-        return cls(extractor=extractor, value_head=value_head)
-
-    @classmethod
-    def from_scratch(
-        cls,
-        config: ModelConfig,
-        key: Array,
-    ) -> "GrobnerAlphaZero":
-        """
-        Initialize model from scratch (no pretraining).
-
-        Args:
-            config: Model configuration.
-            key: JAX random key.
-
-        Returns:
-            Fresh GrobnerAlphaZero model.
-        """
-        keys = jax.random.split(key, 5)
-        k_monomial, k_polynomial, k_ideal, k_scorer, k_value = keys
-
-        monomial_embedder = MonomialEmbedder(
-            config.monomials_dim, config.monoms_embedding_dim, k_monomial
-        )
-        polynomial_embedder = PolynomialEmbedder(
-            input_dim=config.monoms_embedding_dim,
-            hidden_dim=config.polys_embedding_dim,
-            hidden_layers=2,
-            output_dim=config.polys_embedding_dim,
-            key=k_polynomial,
-        )
-        ideal_model = IdealModel(
-            config.polys_embedding_dim,
-            config.ideal_num_heads,
-            config.ideal_depth,
-            k_ideal,
-        )
-        pairwise_scorer = PairwiseScorer(
-            config.polys_embedding_dim, config.polys_embedding_dim, k_scorer
-        )
-        extractor = Extractor(
-            monomial_embedder, polynomial_embedder, ideal_model, pairwise_scorer
-        )
-
-        value_head = eqx.nn.MLP(
-            in_size=config.polys_embedding_dim,
-            out_size=1,
-            width_size=config.value_hidden_dim,
-            depth=2,
-            activation=jax.nn.relu,
-            key=k_value,
-        )
-
-        return cls(extractor=extractor, value_head=value_head)
 
 
 @dataclass
@@ -371,13 +171,13 @@ class MCTSNode:
 
 
 @eqx.filter_jit
-def _jit_single_inference(model: GrobnerAlphaZero, obs: tuple) -> tuple[Array, Array]:
+def _jit_single_inference(model: GrobnerPolicyValue, obs: tuple) -> tuple[Array, Array]:
     """JIT-compiled inference for a single observation."""
     return model(obs)
 
 
 @eqx.filter_jit
-def _jit_batched_inference(model: GrobnerAlphaZero, batched_obs: dict) -> tuple[Array, Array]:
+def _jit_batched_inference(model: GrobnerPolicyValue, batched_obs: dict) -> tuple[Array, Array]:
     """JIT-compiled batched inference using filter_vmap."""
     return eqx.filter_vmap(model)(batched_obs)
 
@@ -392,7 +192,7 @@ class MCTS:
 
     def __init__(
         self,
-        model: GrobnerAlphaZero,
+        model: GrobnerPolicyValue,
         env: BuchbergerEnv,
         config: MCTSConfig,
     ):
@@ -956,154 +756,8 @@ class MCTS:
         return policy, root.q_value
 
 
-
-@dataclass
-class Experience:
-    """
-    A single experience from self-play.
-
-    Attributes:
-        observation: Tokenized observation from the environment.
-        mcts_policy: Visit count distribution from MCTS (target for policy).
-        value: Discounted return from this state (target for value).
-        num_polys: Number of polynomials at this state (for batching).
-    """
-
-    observation: tuple
-    mcts_policy: np.ndarray
-    value: float
-    num_polys: int
-
-
-class ReplayBuffer:
-    """
-    Replay buffer for storing self-play experiences.
-
-    Stores experiences and provides batched sampling for training.
-    """
-
-    def __init__(self, max_size: int = 100000):
-        """
-        Initialize replay buffer.
-
-        Args:
-            max_size: Maximum number of experiences to store.
-        """
-        self.max_size = max_size
-        self.buffer: list[Experience] = []
-        self.position = 0
-
-    def add(self, experiences: list[Experience]) -> None:
-        """
-        Add experiences to the buffer.
-
-        Args:
-            experiences: List of experiences to add.
-        """
-        for exp in experiences:
-            if len(self.buffer) < self.max_size:
-                self.buffer.append(exp)
-            else:
-                self.buffer[self.position] = exp
-            self.position = (self.position + 1) % self.max_size
-
-    def sample(self, batch_size: int) -> list[Experience]:
-        """
-        Sample a batch of experiences.
-
-        Args:
-            batch_size: Number of experiences to sample.
-
-        Returns:
-            List of sampled experiences.
-        """
-        indices = np.random.choice(len(self.buffer), size=min(batch_size, len(self.buffer)), replace=False)
-        return [self.buffer[i] for i in indices]
-
-    def __len__(self) -> int:
-        return len(self.buffer)
-
-
-def batch_experiences(
-    experiences: list[Experience],
-) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Batch a list of experiences for training.
-
-    Args:
-        experiences: List of Experience objects.
-
-    Returns:
-        Tuple of (observations, mcts_policies, values, loss_mask):
-            - observations: Batched observation dict
-            - mcts_policies: Batched MCTS policies
-            - values: Batched value targets
-            - loss_mask: Mask for valid samples
-    """
-    batch_size = len(experiences)
-
-    # Calculate dimensions
-    max_polys = max(exp.num_polys for exp in experiences)
-    max_monoms = max(
-        max(len(p) for p in exp.observation[0]) for exp in experiences
-    )
-    num_vars = len(experiences[0].observation[0][0][0])
-
-    # Allocate buffers
-    batched_ideals = np.zeros(
-        (batch_size, max_polys, max_monoms, num_vars), dtype=np.float32
-    )
-    batched_monomial_masks = np.zeros(
-        (batch_size, max_polys, max_monoms), dtype=bool
-    )
-    batched_poly_masks = np.zeros((batch_size, max_polys), dtype=bool)
-    batched_selectables = np.full(
-        (batch_size, max_polys, max_polys), -np.inf, dtype=np.float32
-    )
-
-    batched_policies = np.zeros((batch_size, max_polys * max_polys), dtype=np.float32)
-    batched_values = np.zeros(batch_size, dtype=np.float32)
-    loss_mask = np.ones(batch_size, dtype=np.float32)
-
-    for i, exp in enumerate(experiences):
-        ideal, selectables = exp.observation
-        num_polys = len(ideal)
-
-        batched_poly_masks[i, :num_polys] = True
-
-        for j, poly in enumerate(ideal):
-            p_len = len(poly)
-            batched_ideals[i, j, :p_len] = poly
-            batched_monomial_masks[i, j, :p_len] = True
-
-        if selectables:
-            rows, cols = zip(*selectables)
-            batched_selectables[i, rows, cols] = 0.0
-
-        # Remap policy to max_polys grid
-        original_policy = exp.mcts_policy
-        original_num_polys = exp.num_polys
-
-        for orig_action in range(len(original_policy)):
-            if original_policy[orig_action] > 0:
-                orig_i, orig_j = orig_action // original_num_polys, orig_action % original_num_polys
-                new_action = orig_i * max_polys + orig_j
-                batched_policies[i, new_action] = original_policy[orig_action]
-
-        batched_values[i] = exp.value
-
-    batched_obs = {
-        "ideals": batched_ideals,
-        "monomial_masks": batched_monomial_masks,
-        "poly_masks": batched_poly_masks,
-        "selectables": batched_selectables,
-    }
-
-    return batched_obs, batched_policies, batched_values, loss_mask
-
-
 def run_self_play_episode(
-    model: GrobnerAlphaZero,
+    model: GrobnerPolicyValue,
     env: BuchbergerEnv,
     mcts_config: MCTSConfig,
     seed: int | None = None,
@@ -1148,7 +802,7 @@ def run_self_play_episode(
         # Store experience (value will be computed later)
         exp = Experience(
             observation=current_obs,
-            mcts_policy=policy,
+            policy=policy,
             value=0.0,  # Placeholder
             num_polys=num_polys,
         )
@@ -1192,7 +846,7 @@ def run_self_play_episode(
 
 
 def generate_self_play_data(
-    model: GrobnerAlphaZero,
+    model: GrobnerPolicyValue,
     env: BuchbergerEnv,
     num_episodes: int,
     mcts_config: MCTSConfig,
@@ -1218,213 +872,8 @@ def generate_self_play_data(
     return all_experiences
 
 
-@dataclass
-class TrainConfig:
-    """Configuration for AlphaZero training."""
-
-    learning_rate: float = 1e-4
-    batch_size: int = 128
-    num_epochs_per_iteration: int = 10
-    policy_loss_weight: float = 1.0
-    value_loss_weight: float = 1.0
-
-
-def alphazero_loss(
-    model: GrobnerAlphaZero,
-    observations: dict,
-    mcts_policies: Array,
-    values: Array,
-    loss_mask: Array,
-) -> tuple[Array, dict]:
-    """
-    Compute combined policy and value loss for AlphaZero.
-
-    Args:
-        model: The GrobnerAlphaZero model.
-        observations: Batched observations dict.
-        mcts_policies: Target MCTS policies (batch_size, max_actions).
-        values: Target values (batch_size,).
-        loss_mask: Mask for valid samples (batch_size,).
-
-    Returns:
-        Tuple of (total_loss, metrics_dict).
-    """
-    # Forward pass
-    policy_logits, pred_values = eqx.filter_vmap(model)(observations)
-
-    # Policy loss: cross-entropy with MCTS policy
-    # Use where to avoid 0 * -inf = nan when mcts_policies is 0
-    log_probs = jax.nn.log_softmax(policy_logits, axis=-1)
-    # Only compute loss where mcts_policies > 0, else use 0
-    policy_cross_entropy = jnp.where(
-        mcts_policies > 0,
-        -mcts_policies * log_probs,
-        0.0
-    )
-    policy_loss = jnp.sum(policy_cross_entropy, axis=-1)
-
-    # Value loss: MSE
-    value_loss = (pred_values - values) ** 2
-
-    # Combine losses
-    total_loss = policy_loss + value_loss
-
-    # Apply mask and compute mean
-    masked_loss = (total_loss * loss_mask).sum() / (loss_mask.sum() + 1e-9)
-    masked_policy_loss = (policy_loss * loss_mask).sum() / (loss_mask.sum() + 1e-9)
-    masked_value_loss = (value_loss * loss_mask).sum() / (loss_mask.sum() + 1e-9)
-
-    metrics = {
-        "policy_loss": masked_policy_loss,
-        "value_loss": masked_value_loss,
-        "total_loss": masked_loss,
-    }
-
-    return masked_loss, metrics
-
-
-def train_alphazero(
-    model: GrobnerAlphaZero,
-    replay_buffer: ReplayBuffer,
-    train_config: TrainConfig,
-    optimizer: optax.GradientTransformation,
-    opt_state: optax.OptState,
-) -> tuple[GrobnerAlphaZero, optax.OptState, dict]:
-    """
-    Train the AlphaZero model on replay buffer data.
-
-    Args:
-        model: The GrobnerAlphaZero model.
-        replay_buffer: Buffer containing self-play experiences.
-        train_config: Training configuration.
-        optimizer: Optax optimizer.
-        opt_state: Current optimizer state.
-
-    Returns:
-        Tuple of (trained_model, new_opt_state, metrics).
-    """
-
-    @eqx.filter_jit
-    def make_step(
-        model: GrobnerAlphaZero,
-        opt_state: optax.OptState,
-        observations: dict,
-        mcts_policies: Array,
-        values: Array,
-        loss_mask: Array,
-    ) -> tuple[GrobnerAlphaZero, optax.OptState, Array, dict]:
-        def loss_fn(m):
-            loss, metrics = alphazero_loss(m, observations, mcts_policies, values, loss_mask)
-            return loss, metrics
-
-        (loss, metrics), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(model)
-        updates, opt_state = optimizer.update(grads, opt_state, eqx.filter(model, eqx.is_array))
-        model = eqx.apply_updates(model, updates)
-        return model, opt_state, loss, metrics
-
-    epoch_metrics = {
-        "policy_loss": [],
-        "value_loss": [],
-        "total_loss": [],
-    }
-
-    num_batches = max(1, len(replay_buffer) // train_config.batch_size)
-
-    for epoch in range(train_config.num_epochs_per_iteration):
-        for _ in range(num_batches):
-            # Sample batch
-            batch = replay_buffer.sample(train_config.batch_size)
-
-            # Batch experiences
-            observations, mcts_policies, values, loss_mask = batch_experiences(batch)
-
-            # Convert to JAX arrays
-            observations = {k: jnp.array(v) for k, v in observations.items()}
-            mcts_policies = jnp.array(mcts_policies)
-            values = jnp.array(values)
-            loss_mask = jnp.array(loss_mask)
-
-            # Training step
-            model, opt_state, loss, metrics = make_step(
-                model, opt_state, observations, mcts_policies, values, loss_mask
-            )
-
-            for k, v in metrics.items():
-                epoch_metrics[k].append(float(v))
-
-    # Compute mean metrics
-    mean_metrics = {k: np.mean(v) for k, v in epoch_metrics.items()}
-
-    return model, opt_state, mean_metrics
-
-
-
-def evaluate_model(
-    model: GrobnerAlphaZero,
-    env: BuchbergerEnv,
-    num_episodes: int = 20,
-) -> dict:
-    """
-    Evaluate the model by playing episodes greedily.
-
-    Args:
-        model: The GrobnerAlphaZero model.
-        env: Environment for evaluation.
-        num_episodes: Number of episodes to evaluate.
-
-    Returns:
-        Dictionary with evaluation metrics.
-    """
-    from grobnerRl.envs.env import make_obs
-
-    episode_rewards = []
-    episode_lengths = []
-
-    for seed in range(num_episodes):
-        env.reset(seed=seed)
-        total_reward = 0.0
-        steps = 0
-        done = False
-
-        while not done:
-            obs = make_obs(env.generators, env.pairs)
-            policy_logits, _ = model(obs)
-
-            # Greedy action selection
-            policy_logits = np.array(policy_logits)
-
-            # Mask invalid actions
-            valid_actions = []
-            num_polys = len(env.generators)
-            for i, j in env.pairs:
-                valid_actions.append(i * num_polys + j)
-
-            mask = np.full(policy_logits.shape, float("-inf"))
-            for a in valid_actions:
-                mask[a] = 0.0
-            masked_logits = policy_logits + mask
-
-            action = int(np.argmax(masked_logits))
-            i, j = action // num_polys, action % num_polys
-
-            _, reward, terminated, truncated, _ = env.step((i, j))
-            total_reward += reward
-            steps += 1
-            done = terminated or truncated
-
-        episode_rewards.append(total_reward)
-        episode_lengths.append(steps)
-
-    return {
-        "mean_reward": np.mean(episode_rewards),
-        "std_reward": np.std(episode_rewards),
-        "mean_length": np.mean(episode_lengths),
-        "std_length": np.std(episode_lengths),
-    }
-
-
 def alphazero_training_loop(
-    model: GrobnerAlphaZero,
+    model: GrobnerPolicyValue,
     env: BuchbergerEnv,
     num_iterations: int,
     episodes_per_iteration: int,
@@ -1435,14 +884,14 @@ def alphazero_training_loop(
     checkpoint_dir: str | None = None,
     eval_interval: int = 5,
     eval_episodes: int = 20,
-) -> GrobnerAlphaZero:
+) -> GrobnerPolicyValue:
     """
     Main AlphaZero training loop.
 
     Alternates between self-play data generation and training.
 
     Args:
-        model: Initial GrobnerAlphaZero model.
+        model: Initial GrobnerPolicyValue model.
         env: Environment for self-play.
         num_iterations: Number of training iterations.
         episodes_per_iteration: Self-play episodes per iteration.
@@ -1455,7 +904,7 @@ def alphazero_training_loop(
         eval_episodes: Number of episodes for evaluation.
 
     Returns:
-        Trained GrobnerAlphaZero model.
+        Trained GrobnerPolicyValue model.
     """
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
@@ -1481,7 +930,7 @@ def alphazero_training_loop(
         metrics: dict = {}
         if len(replay_buffer) >= train_config.batch_size:
             print("\nTraining...")
-            model, opt_state, metrics = train_alphazero(
+            model, opt_state, metrics = train_policy_value(
                 model, replay_buffer, train_config, optimizer, opt_state
             )
             print(

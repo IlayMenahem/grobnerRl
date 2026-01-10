@@ -1,6 +1,9 @@
+from dataclasses import dataclass
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import optax
 from equinox import Module, filter_jit
 from jaxtyping import Array
 
@@ -340,6 +343,220 @@ class GrobnerCritic(Module):
         state_value = jnp.max(vals)
 
         return state_value
+
+
+@dataclass
+class ModelConfig:
+    """Configuration for model architecture."""
+
+    monomials_dim: int
+    monoms_embedding_dim: int = 64
+    polys_embedding_dim: int = 128
+    ideal_depth: int = 4
+    ideal_num_heads: int = 8
+    value_hidden_dim: int = 128
+
+
+class GrobnerPolicyValue(Module):
+    """
+    Neural network model with policy and value heads for RL training.
+
+    The model uses a shared backbone (Extractor) for feature extraction
+    and separate heads for policy logits and value estimation.
+    Used by both AlphaZero and Gumbel MuZero algorithms.
+    """
+
+    extractor: Extractor
+    value_head: eqx.nn.MLP
+
+    def __init__(self, extractor: Extractor, value_head: eqx.nn.MLP):
+        self.extractor = extractor
+        self.value_head = value_head
+
+    def __call__(self, obs: Observation | dict | tuple) -> tuple[Array, Array]:
+        """
+        Forward pass returning policy logits and value estimate.
+
+        Args:
+            obs: Environment observation (tuple or dict format).
+
+        Returns:
+            Tuple of (policy_logits, value).
+        """
+        policy_logits = self.extractor(obs)
+
+        if isinstance(obs, dict):
+            ideal_stacked = obs["ideals"]
+            masks_stacked = obs["monomial_masks"]
+            poly_mask = obs["poly_masks"]
+
+            monomial_embs = jax.vmap(self.extractor.monomial_embedder)(ideal_stacked)
+            ideal_embeddings = jax.vmap(self.extractor.polynomial_embedder)(
+                monomial_embs, masks_stacked
+            )
+            ideal_embeddings = self.extractor.ideal_model(
+                ideal_embeddings, mask=poly_mask
+            )
+
+            masked_embs = jnp.where(poly_mask[:, None], ideal_embeddings, 0.0)
+            pooled = masked_embs.sum(axis=0) / (poly_mask.sum() + 1e-9)
+        else:
+            ideal, _ = obs
+
+            ideal_arrays = [jnp.asarray(p) for p in ideal]
+            lengths = [p.shape[0] for p in ideal_arrays]
+            max_len = max(lengths) if lengths else 1
+
+            padded_ideal = []
+            masks = []
+            for p in ideal_arrays:
+                length = p.shape[0]
+                pad_len = max_len - length
+                if pad_len > 0:
+                    p_padded = jnp.pad(p, ((0, pad_len), (0, 0)), constant_values=0)
+                    mask = jnp.concatenate(
+                        [jnp.ones(length, dtype=bool), jnp.zeros(pad_len, dtype=bool)]
+                    )
+                else:
+                    p_padded = p
+                    mask = jnp.ones(length, dtype=bool)
+                padded_ideal.append(p_padded)
+                masks.append(mask)
+
+            ideal_stacked = jnp.stack(padded_ideal)
+            masks_stacked = jnp.stack(masks)
+
+            monomial_embs = jax.vmap(self.extractor.monomial_embedder)(ideal_stacked)
+            ideal_embeddings = jax.vmap(self.extractor.polynomial_embedder)(
+                monomial_embs, masks_stacked
+            )
+
+            poly_mask = jnp.ones(ideal_embeddings.shape[0], dtype=bool)
+            ideal_embeddings = self.extractor.ideal_model(
+                ideal_embeddings, mask=poly_mask
+            )
+
+            pooled = ideal_embeddings.mean(axis=0)
+
+        value = self.value_head(pooled).squeeze(-1)
+
+        return policy_logits, value
+
+    @classmethod
+    def from_scratch(cls, config: ModelConfig, key: Array) -> "GrobnerPolicyValue":
+        """Initialize model from scratch."""
+        keys = jax.random.split(key, 5)
+        k_monomial, k_polynomial, k_ideal, k_scorer, k_value = keys
+
+        monomial_embedder = MonomialEmbedder(
+            config.monomials_dim, config.monoms_embedding_dim, k_monomial
+        )
+        polynomial_embedder = PolynomialEmbedder(
+            input_dim=config.monoms_embedding_dim,
+            hidden_dim=config.polys_embedding_dim,
+            hidden_layers=2,
+            output_dim=config.polys_embedding_dim,
+            key=k_polynomial,
+        )
+        ideal_model = IdealModel(
+            config.polys_embedding_dim,
+            config.ideal_num_heads,
+            config.ideal_depth,
+            k_ideal,
+        )
+        pairwise_scorer = PairwiseScorer(
+            config.polys_embedding_dim, config.polys_embedding_dim, k_scorer
+        )
+        extractor = Extractor(
+            monomial_embedder, polynomial_embedder, ideal_model, pairwise_scorer
+        )
+
+        value_head = eqx.nn.MLP(
+            in_size=config.polys_embedding_dim,
+            out_size=1,
+            width_size=config.value_hidden_dim,
+            depth=2,
+            activation=jax.nn.relu,
+            key=k_value,
+        )
+
+        return cls(extractor=extractor, value_head=value_head)
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        checkpoint_path: str,
+        config: ModelConfig,
+        optimizer: optax.GradientTransformation,
+        key: Array,
+    ) -> "GrobnerPolicyValue":
+        """
+        Initialize from a pretrained GrobnerPolicy checkpoint.
+
+        Loads the Extractor weights from supervised training and
+        initializes a fresh value head.
+
+        Args:
+            checkpoint_path: Path to supervised training checkpoint.
+            config: Model configuration.
+            optimizer: Optimizer for creating template opt_state.
+            key: JAX random key.
+
+        Returns:
+            GrobnerPolicyValue with pretrained policy weights.
+        """
+        from grobnerRl.training.utils import load_checkpoint
+
+        key, k_value, k_load = jax.random.split(key, 3)
+
+        k_monomial, k_polynomial, k_ideal, k_scorer = jax.random.split(k_load, 4)
+
+        monomial_embedder = MonomialEmbedder(
+            config.monomials_dim, config.monoms_embedding_dim, k_monomial
+        )
+        polynomial_embedder = PolynomialEmbedder(
+            input_dim=config.monoms_embedding_dim,
+            hidden_dim=config.polys_embedding_dim,
+            hidden_layers=2,
+            output_dim=config.polys_embedding_dim,
+            key=k_polynomial,
+        )
+        ideal_model = IdealModel(
+            config.polys_embedding_dim,
+            config.ideal_num_heads,
+            config.ideal_depth,
+            k_ideal,
+        )
+        pairwise_scorer = PairwiseScorer(
+            config.polys_embedding_dim, config.polys_embedding_dim, k_scorer
+        )
+        extractor = Extractor(
+            monomial_embedder, polynomial_embedder, ideal_model, pairwise_scorer
+        )
+        template_policy = GrobnerPolicy(extractor)
+
+        template_opt_state = optimizer.init(eqx.filter(template_policy, eqx.is_array))
+
+        template = {
+            "model": template_policy,
+            "opt_state": template_opt_state,
+            "epoch": 0,
+            "val_accuracy": 0.0,
+        }
+
+        payload = load_checkpoint(checkpoint_path, template)
+        pretrained_extractor = payload["model"].extractor
+
+        value_head = eqx.nn.MLP(
+            in_size=config.polys_embedding_dim,
+            out_size=1,
+            width_size=config.value_hidden_dim,
+            depth=2,
+            activation=jax.nn.relu,
+            key=k_value,
+        )
+
+        return cls(extractor=pretrained_extractor, value_head=value_head)
 
 
 if __name__ == "__main__":
