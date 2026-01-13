@@ -14,44 +14,40 @@ from grobnerRl.envs.env import BuchbergerEnv
 from grobnerRl.envs.ideals import SAT3IdealGenerator
 from grobnerRl.experts import BasicExpert
 from grobnerRl.models import (
-    Extractor,
-    GrobnerPolicy,
-    IdealModel,
-    MonomialEmbedder,
-    PairwiseScorer,
-    PolynomialEmbedder,
+    GrobnerPolicyValue,
+    ModelConfig,
 )
-from grobnerRl.types import Action, Observation
+from grobnerRl.types import Action, Observation, Ideal, SelectablePairs
 from grobnerRl.training.supervised import train_model, evaluate_policy, loss_and_accuracy
 
 
 if __name__ == "__main__":
 
     def batch_fn(
-        x: Sequence[tuple[Observation, Action]],
-    ) -> tuple[dict, np.ndarray, np.ndarray]:
-        observations, actions = zip(*x)
-        batch_size = len(observations)
+        x: Sequence[tuple[Observation, Action, float]],
+    ) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
+        observations, actions, values = zip(*x)
+        batch_size: int = len(observations)
 
         # 1. Calculate dimensions
-        max_polys = max(len(obs[0]) for obs in observations)
-        max_monoms = max(max(len(p) for p in obs[0]) for obs in observations)
+        max_polys: int = max(len(obs[0]) for obs in observations)
+        max_monoms: int = max(max(len(p) for p in obs[0]) for obs in observations)
         num_vars = len(observations[0][0][0][0])
 
         # 2. Allocate buffers
-        batched_ideals = np.zeros(
+        batched_ideals: np.ndarray = np.zeros(
             (batch_size, max_polys, max_monoms, num_vars), dtype=np.float32
         )
-        batched_monomial_masks = np.zeros(
+        batched_monomial_masks: np.ndarray = np.zeros(
             (batch_size, max_polys, max_monoms), dtype=bool
         )
-        batched_poly_masks = np.zeros((batch_size, max_polys), dtype=bool)
-        batched_selectables = np.full(
+        batched_poly_masks: np.ndarray = np.zeros((batch_size, max_polys), dtype=bool)
+        batched_selectables: np.ndarray = np.full(
             (batch_size, max_polys, max_polys), -np.inf, dtype=np.float32
         )
 
-        batched_actions = []
-        loss_mask = []
+        batched_actions: list[int] = []
+        loss_mask: list[float] = []
 
         for i, (ideal, selectables) in enumerate(observations):
             num_polys = len(ideal)
@@ -82,9 +78,12 @@ if __name__ == "__main__":
             "selectables": batched_selectables,
         }
 
+        batched_values = np.array([float(v) for v in values], dtype=np.float32)
+
         return (
             batched_obs,
             np.array(batched_actions, dtype=np.int32),
+            batched_values,
             np.array(loss_mask, dtype=np.float32),
         )
 
@@ -107,26 +106,19 @@ if __name__ == "__main__":
     polys_embedding_dim = 128
     ideal_depth = 4
     ideal_num_heads = 8
+    value_hidden_dim = 128
+
+    config = ModelConfig(
+        monomials_dim=monomials_dim,
+        monoms_embedding_dim=monoms_embedding_dim,
+        polys_embedding_dim=polys_embedding_dim,
+        ideal_depth=ideal_depth,
+        ideal_num_heads=ideal_num_heads,
+        value_hidden_dim=value_hidden_dim,
+    )
 
     key = jax.random.key(0)
-    key, k_monomial, k_polynomial, k_ideal, k_scorer = jax.random.split(key, 5)
-
-    monomial_embedder = MonomialEmbedder(
-        monomials_dim, monoms_embedding_dim, k_monomial
-    )
-    polynomial_embedder = PolynomialEmbedder(
-        input_dim=monoms_embedding_dim,
-        hidden_dim=polys_embedding_dim,
-        hidden_layers=2,
-        output_dim=polys_embedding_dim,
-        key=k_polynomial,
-    )
-    ideal_model = IdealModel(polys_embedding_dim, ideal_num_heads, ideal_depth, k_ideal)
-    pairwise_scorer = PairwiseScorer(polys_embedding_dim, polys_embedding_dim, k_scorer)
-    extractor_eqx = Extractor(
-        monomial_embedder, polynomial_embedder, ideal_model, pairwise_scorer
-    )
-    policy = GrobnerPolicy(extractor_eqx)
+    policy = GrobnerPolicyValue.from_scratch(config, key)
 
     learning_rate = 1e-4
     optimizer = optax.nadam(learning_rate)
@@ -137,15 +129,15 @@ if __name__ == "__main__":
     if not os.path.exists(data_path):
         generate_expert_data(env, dataset_size, data_path, expert_policy)
 
-    full_ds = JsonDatasource(data_path, "states", "actions")
+    full_ds = JsonDatasource(data_path, "states", ["actions", "values"])
     indices = np.arange(len(full_ds))
     split = int(0.8 * len(full_ds))
-    train_indices = indices[:split]
-    val_indices = indices[split:]
+    train_indices = indices[:split].tolist()
+    val_indices = indices[split:].tolist()
 
-    val_datasource = JsonDatasource(data_path, "states", "actions", indices=val_indices)
+    val_datasource = JsonDatasource(data_path, "states", ["actions", "values"], indices=val_indices)
     train_datasource = JsonDatasource(
-        data_path, "states", "actions", indices=train_indices
+        data_path, "states", ["actions", "values"], indices=train_indices
     )
 
     to_batch = Batch(batch_size, True, batch_fn)

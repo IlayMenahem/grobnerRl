@@ -491,72 +491,35 @@ class GrobnerPolicyValue(Module):
         key: Array,
     ) -> "GrobnerPolicyValue":
         """
-        Initialize from a pretrained GrobnerPolicy checkpoint.
+        Initialize from a pretrained GrobnerPolicyValue checkpoint.
 
-        Loads the Extractor weights from supervised training and
-        initializes a fresh value head.
+        Loads the complete GrobnerPolicyValue model including both
+        extractor and value head weights.
 
         Args:
-            checkpoint_path: Path to supervised training checkpoint.
+            checkpoint_path: Path to pretrained checkpoint.
             config: Model configuration.
             optimizer: Optimizer for creating template opt_state.
-            key: JAX random key.
+            key: JAX random key (used for template creation only).
 
         Returns:
-            GrobnerPolicyValue with pretrained policy weights.
+            GrobnerPolicyValue with pretrained weights.
         """
         from grobnerRl.training.utils import load_checkpoint
 
-        key, k_value, k_load = jax.random.split(key, 3)
-
-        k_monomial, k_polynomial, k_ideal, k_scorer = jax.random.split(k_load, 4)
-
-        monomial_embedder = MonomialEmbedder(
-            config.monomials_dim, config.monoms_embedding_dim, k_monomial
-        )
-        polynomial_embedder = PolynomialEmbedder(
-            input_dim=config.monoms_embedding_dim,
-            hidden_dim=config.polys_embedding_dim,
-            hidden_layers=2,
-            output_dim=config.polys_embedding_dim,
-            key=k_polynomial,
-        )
-        ideal_model = IdealModel(
-            config.polys_embedding_dim,
-            config.ideal_num_heads,
-            config.ideal_depth,
-            k_ideal,
-        )
-        pairwise_scorer = PairwiseScorer(
-            config.polys_embedding_dim, config.polys_embedding_dim, k_scorer
-        )
-        extractor = Extractor(
-            monomial_embedder, polynomial_embedder, ideal_model, pairwise_scorer
-        )
-        template_policy = GrobnerPolicy(extractor)
-
-        template_opt_state = optimizer.init(eqx.filter(template_policy, eqx.is_array))
+        template_model = cls.from_scratch(config, key)
+        template_opt_state = optimizer.init(eqx.filter(template_model, eqx.is_array))
 
         template = {
-            "model": template_policy,
+            "model": template_model,
             "opt_state": template_opt_state,
-            "epoch": 0,
-            "val_accuracy": 0.0,
+            "iteration": 0,
+            "metrics": 0.0,
         }
 
         payload = load_checkpoint(checkpoint_path, template)
-        pretrained_extractor = payload["model"].extractor
 
-        value_head = eqx.nn.MLP(
-            in_size=config.polys_embedding_dim,
-            out_size=1,
-            width_size=config.value_hidden_dim,
-            depth=2,
-            activation=jax.nn.relu,
-            key=k_value,
-        )
-
-        return cls(extractor=pretrained_extractor, value_head=value_head)
+        return payload["model"]
 
 
 if __name__ == "__main__":

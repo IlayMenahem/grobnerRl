@@ -9,7 +9,6 @@ training loops.
 from dataclasses import dataclass
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
@@ -152,25 +151,13 @@ def policy_value_loss(
     Returns:
         Tuple of (total_loss, metrics_dict).
     """
-    # Forward pass
     policy_logits, pred_values = eqx.filter_vmap(model)(observations)
 
-    # Policy loss: cross-entropy with target policy
-    log_probs = jax.nn.log_softmax(policy_logits, axis=-1)
-    policy_cross_entropy = jnp.where(
-        target_policies > 0,
-        -target_policies * log_probs,
-        0.0,
-    )
-    policy_loss = jnp.sum(policy_cross_entropy, axis=-1)
+    policy_loss = optax.softmax_cross_entropy(policy_logits, target_policies, where=target_policies > 0)
+    value_loss = optax.huber_loss(pred_values, values)
 
-    # Value loss: MSE
-    value_loss = (pred_values - values) ** 2
-
-    # Combine losses
     total_loss = policy_loss + value_loss
 
-    # Apply mask and compute mean
     masked_loss = (total_loss * loss_mask).sum() / (loss_mask.sum() + 1e-9)
     masked_policy_loss = (policy_loss * loss_mask).sum() / (loss_mask.sum() + 1e-9)
     masked_value_loss = (value_loss * loss_mask).sum() / (loss_mask.sum() + 1e-9)

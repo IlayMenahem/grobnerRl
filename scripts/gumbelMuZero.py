@@ -31,7 +31,7 @@ if __name__ == "__main__":
     multiple = 4.55
     num_clauses = int(num_vars * multiple)
 
-    pretrained_checkpoint_path: str | None = "models/checkpoints/best.eqx"
+    pretrained_checkpoint_path: str | None = os.path.join("models", "checkpoints", "best.eqx")
 
     model_config = ModelConfig(
         monomials_dim=num_vars + 1,
@@ -145,7 +145,7 @@ if __name__ == "__main__":
                 if checkpoint_dir:
                     combined_metrics = {**metrics, **eval_metrics}
                     save_checkpoint(
-                        model, opt_state, checkpoint_dir, "best", iteration + 1, combined_metrics
+                        model, opt_state, checkpoint_dir, "best_gumbel_muzero", iteration + 1, combined_metrics
                     )
                     print(f"  Saved new best model (reward: {best_reward:.2f})")
 

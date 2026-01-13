@@ -55,10 +55,11 @@ def train_model(
         opt_state: optax.OptState,
         observations: dict,
         actions: Array,
+        values: Array,
         loss_mask: Array,
     ) -> tuple[Module, optax.OptState, Array, Array]:
         def loss_fn(m):
-            loss, acc = loss_and_accuracy(m, observations, actions, loss_mask)
+            loss, acc = loss_and_accuracy(m, observations, actions, values, loss_mask)
             return loss, acc
 
         (loss, acc), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(model)
@@ -68,9 +69,9 @@ def train_model(
 
     @eqx.filter_jit
     def eval_step(
-        model: Module, observations: dict, actions: Array, loss_mask: Array
+        model: Module, observations: dict, actions: Array, values: Array, loss_mask: Array
     ) -> tuple[Array, Array]:
-        loss, acc = loss_and_accuracy(model, observations, actions, loss_mask)
+        loss, acc = loss_and_accuracy(model, observations, actions, values, loss_mask)
         return loss, acc
 
     def train_epoch(
@@ -79,9 +80,9 @@ def train_model(
         epoch_losses = []
         epoch_accs = []
 
-        for observations, actions, loss_mask in dataloader_train:
+        for observations, actions, values, loss_mask in dataloader_train:
             policy, opt_state, loss, acc = make_step(
-                policy, opt_state, observations, actions, loss_mask
+                policy, opt_state, observations, actions, values, loss_mask
             )
             epoch_losses.append(loss)
             epoch_accs.append(acc)
@@ -95,8 +96,8 @@ def train_model(
         epoch_losses = []
         epoch_accs = []
 
-        for observations, actions, loss_mask in dataloader_validation:
-            loss, acc = eval_step(policy, observations, actions, loss_mask)
+        for observations, actions, values, loss_mask in dataloader_validation:
+            loss, acc = eval_step(policy, observations, actions, values, loss_mask)
             epoch_losses.append(loss)
             epoch_accs.append(acc)
 
@@ -164,29 +165,34 @@ def train_model(
 
 
 def loss_and_accuracy(
-    model: Module, observations: dict, actions: Array, loss_mask: Array
+    model: Module, observations: dict, actions: Array, values: Array, loss_mask: Array
 ) -> tuple[Array, Array]:
     """
     Compute the loss and accuracy for the given model on the provided observations and actions.
 
     Args:
-    - model (Module): The GrobnerPolicy model.
+    - model (Module): The GrobnerPolicyValue model.
     - observations (dict): A batch of observations (padded).
     - actions (Array): A batch of actions.
+    - values (Array): A batch of target values.
     - loss_mask (Array): A batch of loss masks (1.0 for valid, 0.0 for invalid).
 
     Returns:
-    - loss (Array): The computed loss.
+    - loss (Array): The computed loss (policy + value).
     - accuracy (Array): The computed accuracy.
     """
-    logits = eqx.filter_vmap(model)(observations)
+    policy_logits, pred_values = eqx.filter_vmap(model)(observations)
 
-    per_sample_loss = optax.softmax_cross_entropy_with_integer_labels(logits, actions)
+    per_sample_policy_loss = optax.softmax_cross_entropy_with_integer_labels(policy_logits, actions)
+
+    per_sample_value_loss = optax.huber_loss(pred_values, values)
+
+    per_sample_loss = per_sample_policy_loss + per_sample_value_loss
 
     # Apply mask
     loss = (per_sample_loss * loss_mask).sum() / (loss_mask.sum() + 1e-9)
 
-    predicted_actions = jnp.argmax(logits, axis=-1)
+    predicted_actions = jnp.argmax(policy_logits, axis=-1)
     correct = (predicted_actions == actions) * loss_mask
     accuracy = correct.sum() / (loss_mask.sum() + 1e-9)
 
@@ -224,7 +230,10 @@ def evaluate_policy(
         done = False
 
         while not done:
-            logits = policy(obs)
+            if hasattr(policy, 'extractor'):
+                logits, _ = policy(obs)
+            else:
+                logits = policy(obs)
             action = int(jnp.argmax(logits))
 
             obs, reward, terminated, truncated, _ = policy_env.step(action)

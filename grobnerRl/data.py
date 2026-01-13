@@ -3,7 +3,7 @@ import os
 from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import accumulate
-from typing import SupportsIndex
+from typing import SupportsIndex, Union
 
 import numpy as np
 import torch
@@ -17,32 +17,47 @@ from grobnerRl.experts import BasicExpert, Expert
 from grobnerRl.types import Action, Observation
 
 
-class JsonDatasource(RandomAccessDataSource[tuple[Observation, Action]]):
+class JsonDatasource(RandomAccessDataSource[Union[tuple[Observation, Action], tuple]]):
     def __init__(
         self,
         path: str,
         obs: str,
-        labels: str,
+        labels: str | Sequence[str],
         indices: Sequence[int] | None = None,
     ):
         with open(path, "r") as f:
             dataset = json.load(f)
 
         self.states = dataset[obs]
-        self.actions = dataset[labels]
+        
+        # Handle both single label and multiple labels
+        if isinstance(labels, str):
+            self.labels = [labels]
+            self.multi_label = False
+        else:
+            self.labels = list(labels)
+            self.multi_label = True
+        
+        # Load all label arrays
+        self.label_data = [dataset[label] for label in self.labels]
 
         if indices is not None:
             self.states = [self.states[int(i)] for i in indices]
-            self.actions = [self.actions[int(i)] for i in indices]
+            self.label_data = [[label_array[int(i)] for i in indices] for label_array in self.label_data]
 
     def __len__(self):
         return len(self.states)
 
-    def __getitem__(self, idx: SupportsIndex) -> tuple[Observation, Action]:
+    def __getitem__(self, idx: SupportsIndex) -> Union[tuple[Observation, Action], tuple]:
         state = self.states[idx]
-        action = self.actions[idx]
-
-        return state, action
+        label_values = [label_data[idx] for label_data in self.label_data]
+        
+        if not self.multi_label:
+            # Return (state, action) for backward compatibility
+            return (state, label_values[0])
+        else:
+            # Return (state, label1, label2, ...) for multiple labels
+            return (state, *label_values)
 
 
 class JsonDataset(Dataset):
