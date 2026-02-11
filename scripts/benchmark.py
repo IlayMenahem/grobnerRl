@@ -6,7 +6,7 @@ if __name__ == "__main__":
     from grobnerRl.benchmark.benchmark import benchmark_expert
     from grobnerRl.envs.env import BuchbergerEnv
     from grobnerRl.envs.ideals import SAT3IdealGenerator
-    from grobnerRl.experts import BasicExpert
+    from grobnerRl.experts import BasicExpert, LowestLMExpert
 
     num_vars = 5
     multiplier = 4.55
@@ -17,5 +17,5 @@ if __name__ == "__main__":
 
     env = BuchbergerEnv(ideal_dist)
 
-    buchbergerAgent = BasicExpert(env)
+    buchbergerAgent = LowestLMExpert(env)
     benchmark_expert(buchbergerAgent, num_episodes, env, folder="figs")

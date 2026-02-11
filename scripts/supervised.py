@@ -2,6 +2,8 @@ import os
 from typing import Sequence
 
 import jax
+import jax.numpy as jnp
+from jaxtyping import Array
 import numpy as np
 import optax
 from grain import DataLoader
@@ -12,12 +14,9 @@ from grain.transforms import Batch
 from grobnerRl.data import JsonDatasource, generate_expert_data
 from grobnerRl.envs.env import BuchbergerEnv
 from grobnerRl.envs.ideals import SAT3IdealGenerator
-from grobnerRl.experts import BasicExpert
-from grobnerRl.models import (
-    GrobnerPolicyValue,
-    ModelConfig,
-)
-from grobnerRl.types import Action, Observation, Ideal, SelectablePairs
+from grobnerRl.experts import BasicExpert, LowestLMExpert
+from grobnerRl.models import GrobnerPolicyValue, ModelConfig
+from grobnerRl.types import Action, Observation
 from grobnerRl.training.supervised import train_model, evaluate_policy, loss_and_accuracy
 
 
@@ -25,7 +24,7 @@ if __name__ == "__main__":
 
     def batch_fn(
         x: Sequence[tuple[Observation, Action, float]],
-    ) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[dict, Array, Array, Array]:
         observations, actions, values = zip(*x)
         batch_size: int = len(observations)
 
@@ -78,13 +77,13 @@ if __name__ == "__main__":
             "selectables": batched_selectables,
         }
 
-        batched_values = np.array([float(v) for v in values], dtype=np.float32)
+        batched_values = jnp.array([float(v) for v in values], dtype=jnp.float32)
 
         return (
             batched_obs,
-            np.array(batched_actions, dtype=np.int32),
+            jnp.array(batched_actions, dtype=jnp.int32),
             batched_values,
-            np.array(loss_mask, dtype=np.float32),
+            jnp.array(loss_mask, dtype=jnp.float32),
         )
 
     num_vars = 5
@@ -93,7 +92,7 @@ if __name__ == "__main__":
     ideal_dist = f"{num_vars}-{num_clauses}_sat3"
     ideal_gen = SAT3IdealGenerator(num_vars, num_clauses)
     data_path = os.path.join("data", f"{ideal_dist}.json")
-    checkpoint_dir = os.path.join("models", "checkpoints")
+    checkpoint_dir = os.path.join("models", f"checkpoints_{num_vars}")
 
     num_epochs = 100
     batch_size = 128
@@ -124,7 +123,7 @@ if __name__ == "__main__":
     optimizer = optax.nadam(learning_rate)
 
     env = BuchbergerEnv(ideal_gen)
-    expert_policy = BasicExpert(env)
+    expert_policy = LowestLMExpert(env)
 
     if not os.path.exists(data_path):
         generate_expert_data(env, dataset_size, data_path, expert_policy)
@@ -163,8 +162,7 @@ if __name__ == "__main__":
         worker_buffer_size=4,
     )
 
-    model, losses_train, accuracy_train, losses_validation, accuracy_validation = (
-        train_model(
+    model, losses_train, accuracy_train, losses_validation, accuracy_validation = train_model(
             policy,
             train_dataloader,
             val_dataloader,
@@ -173,15 +171,14 @@ if __name__ == "__main__":
             loss_and_accuracy,
             checkpoint_dir,
             early_stopping_patience,
-            min_delta,
+            min_delta
         )
-    )
 
     eval_policy_env = BuchbergerEnv(
         SAT3IdealGenerator(num_vars, num_clauses), mode="train"
     )
     eval_expert_env = BuchbergerEnv(SAT3IdealGenerator(num_vars, num_clauses))
-    eval_expert = BasicExpert(eval_expert_env)
+    eval_expert = LowestLMExpert(eval_expert_env)
     episodes = 100
 
     evaluate_policy(model, eval_policy_env, eval_expert_env, eval_expert, episodes)

@@ -15,7 +15,8 @@ import optax
 
 from grobnerRl.envs.env import BuchbergerEnv
 from grobnerRl.envs.ideals import SAT3IdealGenerator
-from grobnerRl.training.alphaZero import ModelConfig, MCTSConfig, TrainConfig, GrobnerAlphaZero, ReplayBuffer, alphazero_training_loop
+from grobnerRl.models import ModelConfig, GrobnerPolicyValue
+from grobnerRl.training.alphaZero import MCTSConfig, TrainConfig, ReplayBuffer, alphazero_training_loop
 
 
 if __name__ == "__main__":
@@ -86,7 +87,7 @@ if __name__ == "__main__":
     if pretrained_checkpoint_path and os.path.exists(pretrained_checkpoint_path):
         print(f"Loading pretrained model from {pretrained_checkpoint_path}")
         key, k_model = jax.random.split(key)
-        model = GrobnerAlphaZero.from_pretrained(
+        model = GrobnerPolicyValue.from_pretrained(
             checkpoint_path=pretrained_checkpoint_path,
             config=model_config,
             optimizer=optimizer,
@@ -96,7 +97,7 @@ if __name__ == "__main__":
     else:
         print("Initializing model from scratch")
         key, k_model = jax.random.split(key)
-        model = GrobnerAlphaZero.from_scratch(
+        model = GrobnerPolicyValue.from_scratch(
             config=model_config,
             key=k_model,
         )

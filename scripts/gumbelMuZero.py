@@ -43,7 +43,7 @@ if __name__ == "__main__":
     )
 
     gumbel_config = GumbelMuZeroConfig(
-        num_simulations=16,
+        num_simulations=25,
         max_num_considered_actions=16,
         gamma=0.99,
         c_visit=50.0,
@@ -52,15 +52,15 @@ if __name__ == "__main__":
 
     train_config = TrainConfig(
         learning_rate=1e-4,
-        batch_size=32,
-        num_epochs_per_iteration=3,
+        batch_size=128,
+        num_epochs_per_iteration=4,
         policy_loss_weight=1.0,
         value_loss_weight=1.0,
     )
 
     num_iterations = 50
     episodes_per_iteration = 5
-    replay_buffer_size = 50000
+    replay_buffer_size = 2**14
     checkpoint_dir = os.path.join("models", "gumbel_muzero_checkpoints")
     eval_interval = 5
     eval_episodes = 10
