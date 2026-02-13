@@ -5,6 +5,14 @@ This module implements the Gumbel MuZero algorithm which uses Gumbel-Top-k
 sampling with Sequential Halving for efficient action selection without
 requiring full tree search.
 
+Key components aligned with the paper:
+    - Gumbel-Top-k sampling: Sample m actions without replacement (Equations 3-5)
+    - Sequential Halving: Iteratively halve action set, scoring by g(a) + logits(a) + σ(q̂(a))
+    - Sigma transformation: σ(q̂(a)) = (c_visit + max_b N(b)) * c_scale * q̂(a) (Equation 8)
+    - Completed Q-values: completedQ(a) = q(a) if visited, else v_π (Equation 10)
+    - Improved policy: π' = softmax(logits + σ(completedQ)) (Equation 11)
+    - Policy training: Cross-entropy with improved policy target (equivalent to KL divergence in Equation 12)
+
 References:
     - "Policy improvement by planning with Gumbel" (Danihelka et al., 2022)
 """
@@ -66,20 +74,17 @@ class GumbelNode:
 
 
 def sigma(
-    logits: np.ndarray,
     q_values: np.ndarray,
     visit_counts: np.ndarray,
     c_visit: float,
     c_scale: float,
 ) -> np.ndarray:
     """
-    Compute the completed Q-values using sigma transformation.
-
-    This transforms raw Q-values into a scale compatible with policy logits
-    for action selection.
+    Compute the sigma transformation of Q-values as per Equation 8 in the paper.
+    
+    σ(q̂(a)) = (c_visit + max_b N(b)) * c_scale * q̂(a)
 
     Args:
-        logits: Policy logits from neural network.
         q_values: Q-values for each action.
         visit_counts: Visit counts for each action.
         c_visit: Visit count scaling constant.
@@ -88,20 +93,9 @@ def sigma(
     Returns:
         Transformed Q-values (sigma values).
     """
-    max_logit = logits.max()
-    normalized_visits = visit_counts.sum() / (visit_counts.sum() + c_visit)
-
-    max_q = q_values.max() if visit_counts.sum() > 0 else 0.0
-    min_q = q_values.min() if visit_counts.sum() > 0 else 0.0
-    q_range = max_q - min_q
-
-    if q_range > 0:
-        scale = c_scale * q_range
-    else:
-        scale = c_scale
-
-    sigma_values = normalized_visits * (max_logit + scale * q_values)
-    return sigma_values
+    max_visit = visit_counts.max() if len(visit_counts) > 0 else 0
+    scale_factor = (c_visit + max_visit) * c_scale
+    return scale_factor * q_values
 
 
 def sample_gumbel(key: PRNGKeyArray, shape: tuple[int, ...]) -> Array:
@@ -154,6 +148,7 @@ def copy_env(env: BuchbergerEnv) -> BuchbergerEnv:
 def sequential_halving(
     actions: np.ndarray,
     gumbel_values: np.ndarray,
+    policy_logits: np.ndarray,
     root: GumbelNode,
     env_template: BuchbergerEnv,
     model: GrobnerPolicyValue,
@@ -168,6 +163,7 @@ def sequential_halving(
     Args:
         actions: Initial set of candidate actions.
         gumbel_values: Gumbel values for each action.
+        policy_logits: Full policy logits from neural network.
         root: Root node of the search tree.
         env_template: Environment template for simulation.
         model: Neural network model.
@@ -225,10 +221,15 @@ def sequential_halving(
                     bootstrapped_value = reward + config.gamma * child_value
                     child.value_sum += bootstrapped_value
                 else:
-                    # For already expanded nodes, backup using current Q-value
                     child = root.children[action]
                     child.visit_count += 1
-                    child.value_sum += child.reward + config.gamma * child.q_value
+                    if child.is_terminal:
+                        bootstrapped_value = child.reward
+                    else:
+                        obs = make_obs(child.env.generators, child.env.pairs)
+                        _, child_value = model(obs)
+                        bootstrapped_value = child.reward + config.gamma * float(child_value)
+                    child.value_sum += bootstrapped_value
 
         q_values = np.array(
             [
@@ -243,12 +244,11 @@ def sequential_halving(
             ]
         )
 
-        logits = np.zeros(len(remaining_actions))
+        action_logits = policy_logits[remaining_actions]
         sigma_values = sigma(
-            logits, q_values, visit_counts, config.c_visit, config.c_scale
+            q_values, visit_counts, config.c_visit, config.c_scale
         )
-
-        scores = remaining_gumbels + sigma_values
+        scores = remaining_gumbels + action_logits + sigma_values
 
         num_to_keep = max(1, len(remaining_actions) // 2)
         top_indices = np.argsort(scores)[-num_to_keep:]
@@ -335,21 +335,57 @@ class GumbelMuZeroSearch:
         selected_action = sequential_halving(
             actions,
             gumbel_values,
+            policy_logits,
             root,
             self.env,
             self.model,
             self.config,
         )
 
-        policy = np.zeros(num_polys * num_polys, dtype=np.float32)
-        total_visits = sum(child.visit_count for child in root.children.values())
-
-        if total_visits > 0:
-            for action, child in root.children.items():
-                if child.visit_count > 0:
-                    policy[action] = child.visit_count / total_visits
+        # Construct improved policy using completed Q-values (Equations 10-11)
+        # completedQ(a) = q(a) if N(a) > 0 else v_π
+        
+        # Compute v_π as weighted average of visited Q-values by priors
+        v_pi = 0.0
+        prior_sum = 0.0
+        for action in root.children:
+            if root.children[action].visit_count > 0:
+                v_pi += root.children[action].prior * root.children[action].q_value
+                prior_sum += root.children[action].prior
+        
+        if prior_sum > 0:
+            v_pi /= prior_sum
         else:
-            policy[selected_action] = 1.0
+            v_pi = value  # Fall back to network value
+        
+        # Build completed Q-values
+        completed_q = np.full(num_polys * num_polys, v_pi, dtype=np.float32)
+        for action, child in root.children.items():
+            if child.visit_count > 0:
+                completed_q[action] = child.q_value
+        
+        # Compute sigma transformation for all actions
+        visit_counts = np.zeros(num_polys * num_polys)
+        for action, child in root.children.items():
+            visit_counts[action] = child.visit_count
+        
+        sigma_values = sigma(
+            completed_q, visit_counts, self.config.c_visit, self.config.c_scale
+        )
+        
+        # Construct improved policy: π' = softmax(logits + σ(completedQ))
+        improved_logits = policy_logits + sigma_values
+        
+        # Mask invalid actions
+        mask = np.full_like(improved_logits, -np.inf)
+        for action in valid_actions:
+            mask[action] = 0.0
+        improved_logits = improved_logits + mask
+        
+        # Softmax to get improved policy
+        max_logit = improved_logits.max()
+        exp_logits = np.exp(improved_logits - max_logit)
+        policy = exp_logits / exp_logits.sum()
 
         return policy, value
 

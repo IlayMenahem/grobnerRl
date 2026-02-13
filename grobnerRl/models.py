@@ -438,7 +438,7 @@ class GrobnerPolicyValue(Module):
 
             pooled = ideal_embeddings.mean(axis=0)
 
-        value = self.value_head(pooled).squeeze(-1)
+        value = -jax.nn.softplus(self.value_head(pooled).squeeze(-1))
 
         return policy_logits, value
 

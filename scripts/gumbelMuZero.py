@@ -32,39 +32,46 @@ if __name__ == "__main__":
     multiple = 4.55
     num_clauses = int(num_vars * multiple)
 
-    pretrained_checkpoint_path: str | None = os.path.join("models", "checkpoints", "best.eqx")
+    pretrained_checkpoint_path: str | None = None # os.path.join("models", "checkpoints", "best.eqx")
+
+    monomials_dim = num_vars + 1
+    monoms_embedding_dim = 64
+    polys_embedding_dim = 128
+    ideal_depth = 2
+    ideal_num_heads = 2
+    value_hidden_dim = 128
 
     model_config = ModelConfig(
-        monomials_dim=num_vars + 1,
-        monoms_embedding_dim=64,
-        polys_embedding_dim=128,
-        ideal_depth=2,
-        ideal_num_heads=2,
-        value_hidden_dim=128,
+        monomials_dim=monomials_dim,
+        monoms_embedding_dim=monoms_embedding_dim,
+        polys_embedding_dim=polys_embedding_dim,
+        ideal_depth=ideal_depth,
+        ideal_num_heads=ideal_num_heads,
+        value_hidden_dim=value_hidden_dim,
     )
 
     gumbel_config = GumbelMuZeroConfig(
-        num_simulations=33,
-        max_num_considered_actions=16,
+        num_simulations=9,
+        max_num_considered_actions=4,
         gamma=0.99,
         c_visit=50.0,
         c_scale=1.0,
     )
 
     train_config = TrainConfig(
-        learning_rate=1e-4,
-        batch_size=128,
-        num_epochs_per_iteration=4,
+        learning_rate=5e-4,
+        batch_size=64,
+        num_epochs_per_iteration=2,
         policy_loss_weight=1.0,
         value_loss_weight=1.0,
     )
 
     num_iterations = 50
-    episodes_per_iteration = 5
+    episodes_per_iteration = 3
     replay_buffer_size = 2**14
-    checkpoint_dir = None # os.path.join("models", "gumbel_muzero_checkpoints")
+    checkpoint_dir = os.path.join("models", "gumbel_muzero_checkpoints")
     eval_interval = 5
-    eval_episodes = 10
+    eval_episodes = 100
 
     key = jax.random.key(42)
 
