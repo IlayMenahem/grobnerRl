@@ -1,13 +1,8 @@
-"""
-Shared training utilities for RL algorithms (AlphaZero, Gumbel MuZero).
-
-This module provides common components used across different RL training
-algorithms, including experience storage, batching, loss functions, and
-training loops.
-"""
+"""Shared training utilities for RL algorithms with memory-efficient experience storage."""
 
 from dataclasses import dataclass
 import sys
+from typing import Dict
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -19,21 +14,68 @@ from grobnerRl.envs.env import BuchbergerEnv, make_obs
 from grobnerRl.models import GrobnerPolicyValue
 
 
+class PolynomialCache:
+    """Cache for deduplicating polynomials with reference counting."""
+    
+    def __init__(self):
+        self._cache: list[np.ndarray] = []
+        self._hash_to_idx: Dict[bytes, int] = {}
+        self._ref_counts: list[int] = []
+        self._free_slots: list[int] = []
+    
+    def add_polynomial(self, poly: np.ndarray) -> int:
+        """Add polynomial and return index. Increments ref count."""
+        poly_hash = poly.tobytes()
+        
+        if poly_hash in self._hash_to_idx:
+            idx = self._hash_to_idx[poly_hash]
+            self._ref_counts[idx] += 1
+            return idx
+        
+        if self._free_slots:
+            idx = self._free_slots.pop()
+            self._cache[idx] = poly
+            self._ref_counts[idx] = 1
+        else:
+            idx = len(self._cache)
+            self._cache.append(poly)
+            self._ref_counts.append(1)
+        
+        self._hash_to_idx[poly_hash] = idx
+        return idx
+    
+    def remove_reference(self, idx: int) -> None:
+        """Decrement ref count. Free slot if count reaches zero."""
+        if idx >= len(self._ref_counts):
+            return
+        
+        self._ref_counts[idx] -= 1
+        if self._ref_counts[idx] <= 0:
+            poly_hash = self._cache[idx].tobytes()
+            del self._hash_to_idx[poly_hash]
+            self._cache[idx] = None  # type: ignore
+            self._free_slots.append(idx)
+    
+    def get_polynomial(self, idx: int) -> np.ndarray:
+        """Get polynomial by index."""
+        return self._cache[idx]
+    
+    def __len__(self) -> int:
+        return len(self._cache) - len(self._free_slots)
+    
+    def memory_usage(self) -> int:
+        """Total memory of active polynomials."""
+        return sum(poly.nbytes for poly in self._cache if poly is not None)
+
+
 @dataclass
 class Experience:
-    """
-    A compressed experience from self-play with lossless compression.
+    """Compressed experience with sparse policy and deduplicated polynomials."""
     
-    Memory optimization:
-    - Policy stored sparsely (only non-zero entries)
-    - Observation stored with efficient dtypes
-    """
-    ideal: tuple[np.ndarray, ...]
+    poly_indices: tuple[int, ...]
     selectables: tuple[tuple[int, int], ...]
-    
     policy_indices: np.ndarray
     policy_values: np.ndarray
-    
     value: float
     num_polys: int
     
@@ -43,40 +85,41 @@ class Experience:
         policy: np.ndarray,
         value: float,
         num_polys: int,
+        poly_cache: PolynomialCache,
     ) -> "Experience":
         """Create compressed experience from uncompressed data."""
         ideal, selectables = observation
         
-        # Ensure ideal polynomials are float32 (not float64)
-        ideal_compressed = tuple(
-            poly.astype(np.float32) if poly.dtype != np.float32 else poly
+        poly_indices = tuple(
+            poly_cache.add_polynomial(
+                poly.astype(np.float32) if poly.dtype != np.float32 else poly
+            )
             for poly in ideal
         )
         
-        # Convert selectables to tuple of tuples (immutable, memory efficient)
         if isinstance(selectables, list):
-            selectables_compressed = tuple(tuple(pair) for pair in selectables)
-        else:
-            selectables_compressed = selectables
+            selectables = tuple(tuple(pair) for pair in selectables)
         
-        # Compress policy (sparse representation)
         nonzero_indices = np.nonzero(policy)[0]
         policy_indices = nonzero_indices.astype(np.int32)
         policy_values = policy[nonzero_indices].astype(np.float32)
         
         return Experience(
-            ideal=ideal_compressed,
-            selectables=selectables_compressed,
+            poly_indices=poly_indices,
+            selectables=selectables,
             policy_indices=policy_indices,
             policy_values=policy_values,
             value=float(value),
             num_polys=num_polys,
         )
     
-    @property
-    def observation(self) -> tuple:
-        """Reconstruct observation tuple for backward compatibility."""
-        return (self.ideal, self.selectables)
+    def get_ideal(self, poly_cache: PolynomialCache) -> tuple[np.ndarray, ...]:
+        """Reconstruct ideal from polynomial indices."""
+        return tuple(poly_cache.get_polynomial(idx) for idx in self.poly_indices)
+    
+    def observation(self, poly_cache: PolynomialCache) -> tuple:
+        """Reconstruct observation tuple."""
+        return (self.get_ideal(poly_cache), self.selectables)
     
     @property
     def policy(self) -> np.ndarray:
@@ -85,52 +128,32 @@ class Experience:
         policy[self.policy_indices] = self.policy_values
         return policy
     
-    def memory_usage(self) -> int:
-        """
-        Estimate memory usage in bytes.
+    def memory_usage(self, poly_cache: PolynomialCache, count_polys: bool = True) -> int:
+        """Estimate memory usage in bytes."""
+        total = sys.getsizeof(self.poly_indices) + len(self.poly_indices) * 8
         
-        Returns:
-            Approximate memory usage in bytes.
-        """
-        total = 0
+        if count_polys:
+            for idx in self.poly_indices:
+                total += poly_cache.get_polynomial(idx).nbytes
         
-        # Ideal polynomials
-        for poly in self.ideal:
-            total += poly.nbytes
-        
-        # Selectables (tuple of tuples)
         total += sys.getsizeof(self.selectables)
         total += sum(sys.getsizeof(pair) for pair in self.selectables)
-        
-        # Sparse policy
-        total += self.policy_indices.nbytes
-        total += self.policy_values.nbytes
-        
-        # Scalars
-        total += sys.getsizeof(self.value)
-        total += sys.getsizeof(self.num_polys)
+        total += self.policy_indices.nbytes + self.policy_values.nbytes
+        total += sys.getsizeof(self.value) + sys.getsizeof(self.num_polys)
         
         return total
     
-    def compression_ratio(self) -> float:
-        """
-        Compute compression ratio vs uncompressed format.
+    def compression_ratio(self, poly_cache: PolynomialCache) -> float:
+        """Compression ratio vs uncompressed format."""
+        compressed = self.memory_usage(poly_cache, count_polys=True)
         
-        Returns:
-            Ratio of compressed size to uncompressed size.
-        """
-        # Compressed size
-        compressed = self.memory_usage()
-        
-        # Uncompressed size (dense policy + observation)
-        uncompressed = 0
-        for poly in self.ideal:
-            uncompressed += poly.nbytes
+        uncompressed = sum(
+            poly_cache.get_polynomial(idx).nbytes for idx in self.poly_indices
+        )
         uncompressed += sys.getsizeof(self.selectables)
         uncompressed += sum(sys.getsizeof(pair) for pair in self.selectables)
-        uncompressed += (self.num_polys ** 2) * 4  # float32 dense policy
-        uncompressed += sys.getsizeof(self.value)
-        uncompressed += sys.getsizeof(self.num_polys)
+        uncompressed += (self.num_polys ** 2) * 4
+        uncompressed += sys.getsizeof(self.value) + sys.getsizeof(self.num_polys)
         
         return compressed / uncompressed if uncompressed > 0 else 1.0
 
@@ -147,128 +170,130 @@ class TrainConfig:
 
 
 class ReplayBuffer:
-    """Replay buffer for storing self-play experiences."""
+    """Replay buffer with polynomial deduplication and automatic cleanup."""
 
-    def __init__(self, max_size: int = 100000):
+    def __init__(self, max_size: int = 100000, poly_cache: PolynomialCache | None = None):
         self.max_size = max_size
         self.buffer: list[Experience] = []
         self.position = 0
+        self.poly_cache = poly_cache if poly_cache is not None else PolynomialCache()
 
     def add(self, experiences: list[Experience]) -> None:
-        """Add experiences to the buffer."""
+        """Add experiences to buffer. Cleans up old experiences when full."""
         for exp in experiences:
             if len(self.buffer) < self.max_size:
                 self.buffer.append(exp)
             else:
+                old_exp = self.buffer[self.position]
+                for idx in old_exp.poly_indices:
+                    self.poly_cache.remove_reference(idx)
                 self.buffer[self.position] = exp
             self.position = (self.position + 1) % self.max_size
 
     def sample(self, batch_size: int) -> list[Experience]:
-        """Sample a batch of experiences."""
+        """Sample random batch of experiences."""
         indices = np.random.choice(
             len(self.buffer), size=min(batch_size, len(self.buffer)), replace=False
         )
         return [self.buffer[i] for i in indices]
     
     def sample_batched(self, batch_size: int) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
-        """Sample a batch of experiences and batch them."""
-        experiences = self.sample(batch_size)
-        return batch_experiences(experiences)
+        """Sample and batch experiences."""
+        return batch_experiences(self.sample(batch_size), self.poly_cache)
 
     def __len__(self) -> int:
         return len(self.buffer)
     
     def memory_usage(self) -> dict:
-        """
-        Compute memory usage statistics for the replay buffer.
-        
-        Returns:
-            Dictionary with memory statistics in bytes and MB.
-        """
+        """Memory usage statistics including deduplication savings."""
         if len(self.buffer) == 0:
             return {
                 "total_bytes": 0,
                 "total_mb": 0.0,
                 "avg_bytes_per_experience": 0,
                 "avg_compression_ratio": 1.0,
+                "poly_cache_bytes": 0,
+                "poly_cache_mb": 0.0,
+                "unique_polynomials": 0,
+                "deduplication_ratio": 1.0,
             }
         
-        total_bytes = sum(exp.memory_usage() for exp in self.buffer)
-        avg_compression = np.mean([exp.compression_ratio() for exp in self.buffer])
+        exp_bytes = sum(exp.memory_usage(self.poly_cache, count_polys=False) 
+                       for exp in self.buffer)
+        cache_bytes = self.poly_cache.memory_usage()
+        total_bytes = exp_bytes + cache_bytes
+        
+        total_poly_refs = sum(len(exp.poly_indices) for exp in self.buffer)
+        num_unique = len(self.poly_cache)
+        dedup_ratio = num_unique / total_poly_refs if total_poly_refs > 0 else 1.0
+        
+        avg_compression = np.mean([exp.compression_ratio(self.poly_cache) 
+                                   for exp in self.buffer])
         
         return {
             "total_bytes": total_bytes,
             "total_mb": total_bytes / (1024 * 1024),
             "avg_bytes_per_experience": total_bytes / len(self.buffer),
             "avg_compression_ratio": float(avg_compression),
+            "poly_cache_bytes": cache_bytes,
+            "poly_cache_mb": cache_bytes / (1024 * 1024),
+            "unique_polynomials": num_unique,
+            "deduplication_ratio": float(dedup_ratio),
         }
 
 
 def batch_experiences(
     experiences: list[Experience],
+    poly_cache: PolynomialCache,
 ) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Batch a list of compressed experiences for training.
-    
-    Works directly with compressed format to avoid unnecessary decompression.
-    """
+    """Batch compressed experiences for training."""
     batch_size = len(experiences)
-
     max_polys = max(exp.num_polys for exp in experiences)
+    
+    first_ideal = experiences[0].get_ideal(poly_cache)
     max_monoms = max(
-        max(len(p) for p in exp.ideal) for exp in experiences
+        max(len(p) for p in exp.get_ideal(poly_cache)) for exp in experiences
     )
-    num_vars = len(experiences[0].ideal[0][0])
+    num_vars = len(first_ideal[0][0])
 
     batched_ideals = np.zeros(
         (batch_size, max_polys, max_monoms, num_vars), dtype=np.float32
     )
-    batched_monomial_masks = np.zeros(
-        (batch_size, max_polys, max_monoms), dtype=bool
-    )
+    batched_monomial_masks = np.zeros((batch_size, max_polys, max_monoms), dtype=bool)
     batched_poly_masks = np.zeros((batch_size, max_polys), dtype=bool)
     batched_selectables = np.full(
         (batch_size, max_polys, max_polys), -np.inf, dtype=np.float32
     )
-
     batched_policies = np.zeros((batch_size, max_polys * max_polys), dtype=np.float32)
     batched_values = np.zeros(batch_size, dtype=np.float32)
     loss_mask = np.ones(batch_size, dtype=np.float32)
 
     for i, exp in enumerate(experiences):
-        ideal = exp.ideal
-        selectables = exp.selectables
-        num_polys = len(ideal)
-
-        batched_poly_masks[i, :num_polys] = True
+        ideal = exp.get_ideal(poly_cache)
+        batched_poly_masks[i, :len(ideal)] = True
 
         for j, poly in enumerate(ideal):
             p_len = len(poly)
             batched_ideals[i, j, :p_len] = poly
             batched_monomial_masks[i, j, :p_len] = True
 
-        if selectables:
-            rows, cols = zip(*selectables)
+        if exp.selectables:
+            rows, cols = zip(*exp.selectables)
             batched_selectables[i, rows, cols] = 0.0
 
-        original_num_polys = exp.num_polys
         for idx, val in zip(exp.policy_indices, exp.policy_values):
-            # Map from original action space to batched action space
-            orig_i = idx // original_num_polys
-            orig_j = idx % original_num_polys
-            new_action = orig_i * max_polys + orig_j
-            batched_policies[i, new_action] = val
+            orig_i = idx // exp.num_polys
+            orig_j = idx % exp.num_polys
+            batched_policies[i, orig_i * max_polys + orig_j] = val
 
         batched_values[i] = exp.value
 
-    batched_obs = {
+    return {
         "ideals": batched_ideals,
         "monomial_masks": batched_monomial_masks,
         "poly_masks": batched_poly_masks,
         "selectables": batched_selectables,
-    }
-
-    return batched_obs, batched_policies, batched_values, loss_mask
+    }, batched_policies, batched_values, loss_mask
 
 
 def policy_value_loss(

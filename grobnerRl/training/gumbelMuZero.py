@@ -379,6 +379,7 @@ def run_self_play_episode(
     env: BuchbergerEnv,
     config: GumbelMuZeroConfig,
     key: PRNGKeyArray,
+    poly_cache,
 ) -> list[Experience]:
     """Run a single self-play episode."""
     env.reset()
@@ -395,11 +396,12 @@ def run_self_play_episode(
         key, subkey = jax.random.split(key)
         policy, _ = search.search(env, subkey)
 
-        exp = Experience(
+        exp = Experience.from_uncompressed(
             observation=current_obs,
             policy=policy,
             value=0.0,
             num_polys=num_polys,
+            poly_cache=poly_cache,
         )
         experiences.append(exp)
 
@@ -437,6 +439,7 @@ def generate_self_play_data(
     num_episodes: int,
     config: GumbelMuZeroConfig,
     key: PRNGKeyArray,
+    poly_cache,
 ) -> list[Experience]:
     """Generate self-play data from multiple episodes."""
     from tqdm import tqdm
@@ -445,7 +448,7 @@ def generate_self_play_data(
 
     for episode in tqdm(range(num_episodes), desc="Self-play"):
         key, subkey = jax.random.split(key)
-        experiences = run_self_play_episode(model, env, config, subkey)
+        experiences = run_self_play_episode(model, env, config, subkey, poly_cache)
         all_experiences.extend(experiences)
 
     return all_experiences

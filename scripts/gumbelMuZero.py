@@ -23,6 +23,7 @@ from grobnerRl.training.shared import (
     TrainConfig,
     evaluate_model,
     train_policy_value,
+    PolynomialCache,
 )
 from grobnerRl.training.utils import save_checkpoint
 
@@ -31,19 +32,19 @@ if __name__ == "__main__":
     multiple = 4.55
     num_clauses = int(num_vars * multiple)
 
-    pretrained_checkpoint_path: str | None = os.path.join("models", "checkpoints_LML", "best.eqx")
+    pretrained_checkpoint_path: str | None = os.path.join("models", "checkpoints", "best.eqx")
 
     model_config = ModelConfig(
         monomials_dim=num_vars + 1,
         monoms_embedding_dim=64,
         polys_embedding_dim=128,
-        ideal_depth=4,
-        ideal_num_heads=8,
+        ideal_depth=2,
+        ideal_num_heads=2,
         value_hidden_dim=128,
     )
 
     gumbel_config = GumbelMuZeroConfig(
-        num_simulations=25,
+        num_simulations=33,
         max_num_considered_actions=16,
         gamma=0.99,
         c_visit=50.0,
@@ -61,7 +62,7 @@ if __name__ == "__main__":
     num_iterations = 50
     episodes_per_iteration = 5
     replay_buffer_size = 2**14
-    checkpoint_dir = os.path.join("models", "gumbel_muzero_checkpoints")
+    checkpoint_dir = None # os.path.join("models", "gumbel_muzero_checkpoints")
     eval_interval = 5
     eval_episodes = 10
 
@@ -87,7 +88,8 @@ if __name__ == "__main__":
         key, k_model = jax.random.split(key)
         model = GrobnerPolicyValue.from_scratch(config=model_config, key=k_model)
 
-    replay_buffer = ReplayBuffer(max_size=replay_buffer_size)
+    poly_cache = PolynomialCache()
+    replay_buffer = ReplayBuffer(max_size=replay_buffer_size, poly_cache=poly_cache)
 
     print("\nStarting Gumbel MuZero training...")
     print(f"  Iterations: {num_iterations}")
@@ -108,7 +110,7 @@ if __name__ == "__main__":
         print("\nGenerating self-play data...")
         key, subkey = jax.random.split(key)
         experiences = generate_self_play_data(
-            model, env, episodes_per_iteration, gumbel_config, subkey
+            model, env, episodes_per_iteration, gumbel_config, subkey, poly_cache
         )
         print(f"Generated {len(experiences)} experiences")
 

@@ -17,6 +17,7 @@ from grobnerRl.envs.env import BuchbergerEnv
 from grobnerRl.envs.ideals import SAT3IdealGenerator
 from grobnerRl.models import ModelConfig, GrobnerPolicyValue
 from grobnerRl.training.alphaZero import MCTSConfig, TrainConfig, ReplayBuffer, alphazero_training_loop
+from grobnerRl.training.shared import PolynomialCache
 
 
 if __name__ == "__main__":
@@ -102,8 +103,9 @@ if __name__ == "__main__":
             key=k_model,
         )
 
-    # Create replay buffer
-    replay_buffer = ReplayBuffer(max_size=replay_buffer_size)
+    # Create polynomial cache and replay buffer
+    poly_cache = PolynomialCache()
+    replay_buffer = ReplayBuffer(max_size=replay_buffer_size, poly_cache=poly_cache)
 
     # -------------------------------------------------------------------------
     # Training

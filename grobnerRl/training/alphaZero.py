@@ -760,6 +760,7 @@ def run_self_play_episode(
     model: GrobnerPolicyValue,
     env: BuchbergerEnv,
     mcts_config: MCTSConfig,
+    poly_cache,
     seed: int | None = None,
 ) -> list[Experience]:
     """
@@ -799,12 +800,12 @@ def run_self_play_episode(
         else:
             policy, _ = mcts.search(env, add_noise=True)
 
-        # Store experience (value will be computed later)
-        exp = Experience(
+        exp = Experience.from_uncompressed(
             observation=current_obs,
             policy=policy,
-            value=0.0,  # Placeholder
+            value=0.0,
             num_polys=num_polys,
+            poly_cache=poly_cache,
         )
         experiences.append(exp)
 
@@ -850,23 +851,13 @@ def generate_self_play_data(
     env: BuchbergerEnv,
     num_episodes: int,
     mcts_config: MCTSConfig,
+    poly_cache,
 ) -> list[Experience]:
-    """
-    Generate self-play data from multiple episodes.
-
-    Args:
-        model: AlphaZero model for MCTS guidance.
-        env: Environment template.
-        num_episodes: Number of episodes to generate.
-        mcts_config: MCTS configuration.
-
-    Returns:
-        List of all experiences from all episodes.
-    """
+    """Generate self-play data from multiple episodes."""
     all_experiences = []
 
     for episode in tqdm(range(num_episodes), desc="Self-play"):
-        experiences = run_self_play_episode(model, env, mcts_config, seed=episode)
+        experiences = run_self_play_episode(model, env, mcts_config, poly_cache, seed=episode)
         all_experiences.extend(experiences)
 
     return all_experiences
@@ -918,7 +909,7 @@ def alphazero_training_loop(
         # 1. Self-play: generate data with current model
         print("\nGenerating self-play data...")
         experiences = generate_self_play_data(
-            model, env, episodes_per_iteration, mcts_config
+            model, env, episodes_per_iteration, mcts_config, replay_buffer.poly_cache
         )
         print(f"Generated {len(experiences)} experiences from {episodes_per_iteration} episodes")
 
