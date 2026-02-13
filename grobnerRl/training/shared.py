@@ -7,6 +7,7 @@ training loops.
 """
 
 from dataclasses import dataclass
+import sys
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -20,12 +21,118 @@ from grobnerRl.models import GrobnerPolicyValue
 
 @dataclass
 class Experience:
-    """A single experience from self-play."""
-
-    observation: tuple
-    policy: np.ndarray
+    """
+    A compressed experience from self-play with lossless compression.
+    
+    Memory optimization:
+    - Policy stored sparsely (only non-zero entries)
+    - Observation stored with efficient dtypes
+    """
+    ideal: tuple[np.ndarray, ...]
+    selectables: tuple[tuple[int, int], ...]
+    
+    policy_indices: np.ndarray
+    policy_values: np.ndarray
+    
     value: float
     num_polys: int
+    
+    @staticmethod
+    def from_uncompressed(
+        observation: tuple,
+        policy: np.ndarray,
+        value: float,
+        num_polys: int,
+    ) -> "Experience":
+        """Create compressed experience from uncompressed data."""
+        ideal, selectables = observation
+        
+        # Ensure ideal polynomials are float32 (not float64)
+        ideal_compressed = tuple(
+            poly.astype(np.float32) if poly.dtype != np.float32 else poly
+            for poly in ideal
+        )
+        
+        # Convert selectables to tuple of tuples (immutable, memory efficient)
+        if isinstance(selectables, list):
+            selectables_compressed = tuple(tuple(pair) for pair in selectables)
+        else:
+            selectables_compressed = selectables
+        
+        # Compress policy (sparse representation)
+        nonzero_indices = np.nonzero(policy)[0]
+        policy_indices = nonzero_indices.astype(np.int32)
+        policy_values = policy[nonzero_indices].astype(np.float32)
+        
+        return Experience(
+            ideal=ideal_compressed,
+            selectables=selectables_compressed,
+            policy_indices=policy_indices,
+            policy_values=policy_values,
+            value=float(value),
+            num_polys=num_polys,
+        )
+    
+    @property
+    def observation(self) -> tuple:
+        """Reconstruct observation tuple for backward compatibility."""
+        return (self.ideal, self.selectables)
+    
+    @property
+    def policy(self) -> np.ndarray:
+        """Reconstruct dense policy array."""
+        policy = np.zeros(self.num_polys * self.num_polys, dtype=np.float32)
+        policy[self.policy_indices] = self.policy_values
+        return policy
+    
+    def memory_usage(self) -> int:
+        """
+        Estimate memory usage in bytes.
+        
+        Returns:
+            Approximate memory usage in bytes.
+        """
+        total = 0
+        
+        # Ideal polynomials
+        for poly in self.ideal:
+            total += poly.nbytes
+        
+        # Selectables (tuple of tuples)
+        total += sys.getsizeof(self.selectables)
+        total += sum(sys.getsizeof(pair) for pair in self.selectables)
+        
+        # Sparse policy
+        total += self.policy_indices.nbytes
+        total += self.policy_values.nbytes
+        
+        # Scalars
+        total += sys.getsizeof(self.value)
+        total += sys.getsizeof(self.num_polys)
+        
+        return total
+    
+    def compression_ratio(self) -> float:
+        """
+        Compute compression ratio vs uncompressed format.
+        
+        Returns:
+            Ratio of compressed size to uncompressed size.
+        """
+        # Compressed size
+        compressed = self.memory_usage()
+        
+        # Uncompressed size (dense policy + observation)
+        uncompressed = 0
+        for poly in self.ideal:
+            uncompressed += poly.nbytes
+        uncompressed += sys.getsizeof(self.selectables)
+        uncompressed += sum(sys.getsizeof(pair) for pair in self.selectables)
+        uncompressed += (self.num_polys ** 2) * 4  # float32 dense policy
+        uncompressed += sys.getsizeof(self.value)
+        uncompressed += sys.getsizeof(self.num_polys)
+        
+        return compressed / uncompressed if uncompressed > 0 else 1.0
 
 
 @dataclass
@@ -62,22 +169,56 @@ class ReplayBuffer:
             len(self.buffer), size=min(batch_size, len(self.buffer)), replace=False
         )
         return [self.buffer[i] for i in indices]
+    
+    def sample_batched(self, batch_size: int) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
+        """Sample a batch of experiences and batch them."""
+        experiences = self.sample(batch_size)
+        return batch_experiences(experiences)
 
     def __len__(self) -> int:
         return len(self.buffer)
+    
+    def memory_usage(self) -> dict:
+        """
+        Compute memory usage statistics for the replay buffer.
+        
+        Returns:
+            Dictionary with memory statistics in bytes and MB.
+        """
+        if len(self.buffer) == 0:
+            return {
+                "total_bytes": 0,
+                "total_mb": 0.0,
+                "avg_bytes_per_experience": 0,
+                "avg_compression_ratio": 1.0,
+            }
+        
+        total_bytes = sum(exp.memory_usage() for exp in self.buffer)
+        avg_compression = np.mean([exp.compression_ratio() for exp in self.buffer])
+        
+        return {
+            "total_bytes": total_bytes,
+            "total_mb": total_bytes / (1024 * 1024),
+            "avg_bytes_per_experience": total_bytes / len(self.buffer),
+            "avg_compression_ratio": float(avg_compression),
+        }
 
 
 def batch_experiences(
     experiences: list[Experience],
 ) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
-    """Batch a list of experiences for training."""
+    """
+    Batch a list of compressed experiences for training.
+    
+    Works directly with compressed format to avoid unnecessary decompression.
+    """
     batch_size = len(experiences)
 
     max_polys = max(exp.num_polys for exp in experiences)
     max_monoms = max(
-        max(len(p) for p in exp.observation[0]) for exp in experiences
+        max(len(p) for p in exp.ideal) for exp in experiences
     )
-    num_vars = len(experiences[0].observation[0][0][0])
+    num_vars = len(experiences[0].ideal[0][0])
 
     batched_ideals = np.zeros(
         (batch_size, max_polys, max_monoms, num_vars), dtype=np.float32
@@ -95,7 +236,8 @@ def batch_experiences(
     loss_mask = np.ones(batch_size, dtype=np.float32)
 
     for i, exp in enumerate(experiences):
-        ideal, selectables = exp.observation
+        ideal = exp.ideal
+        selectables = exp.selectables
         num_polys = len(ideal)
 
         batched_poly_masks[i, :num_polys] = True
@@ -109,15 +251,13 @@ def batch_experiences(
             rows, cols = zip(*selectables)
             batched_selectables[i, rows, cols] = 0.0
 
-        original_policy = exp.policy
         original_num_polys = exp.num_polys
-
-        for orig_action in range(len(original_policy)):
-            if original_policy[orig_action] > 0:
-                orig_i = orig_action // original_num_polys
-                orig_j = orig_action % original_num_polys
-                new_action = orig_i * max_polys + orig_j
-                batched_policies[i, new_action] = original_policy[orig_action]
+        for idx, val in zip(exp.policy_indices, exp.policy_values):
+            # Map from original action space to batched action space
+            orig_i = idx // original_num_polys
+            orig_j = idx % original_num_polys
+            new_action = orig_i * max_polys + orig_j
+            batched_policies[i, new_action] = val
 
         batched_values[i] = exp.value
 
@@ -216,8 +356,7 @@ def train_policy_value(
 
     for _ in range(train_config.num_epochs_per_iteration):
         for _ in range(num_batches):
-            batch = replay_buffer.sample(train_config.batch_size)
-            observations, target_policies, values, loss_mask = batch_experiences(batch)
+            observations, target_policies, values, loss_mask = replay_buffer.sample_batched(train_config.batch_size)
 
             observations = {k: jnp.array(v) for k, v in observations.items()}
             target_policies = jnp.array(target_policies)

@@ -65,8 +65,13 @@ class GumbelNode:
         return self.value_sum / self.visit_count
 
 
-def sigma(logits: np.ndarray, q_values: np.ndarray, visit_counts: np.ndarray,
-          c_visit: float, c_scale: float) -> np.ndarray:
+def sigma(
+    logits: np.ndarray,
+    q_values: np.ndarray,
+    visit_counts: np.ndarray,
+    c_visit: float,
+    c_scale: float,
+) -> np.ndarray:
     """
     Compute the completed Q-values using sigma transformation.
 
@@ -85,16 +90,16 @@ def sigma(logits: np.ndarray, q_values: np.ndarray, visit_counts: np.ndarray,
     """
     max_logit = logits.max()
     normalized_visits = visit_counts.sum() / (visit_counts.sum() + c_visit)
-    
+
     max_q = q_values.max() if visit_counts.sum() > 0 else 0.0
     min_q = q_values.min() if visit_counts.sum() > 0 else 0.0
     q_range = max_q - min_q
-    
+
     if q_range > 0:
         scale = c_scale * q_range
     else:
         scale = c_scale
-    
+
     sigma_values = normalized_visits * (max_logit + scale * q_values)
     return sigma_values
 
@@ -125,16 +130,16 @@ def gumbel_top_k(
     """
     valid_logits = logits[valid_actions]
     gumbel_noise = np.array(sample_gumbel(key, (len(valid_actions),)))
-    
+
     perturbed = valid_logits + gumbel_noise
-    
+
     k = min(k, len(valid_actions))
     top_k_indices = np.argpartition(perturbed, -k)[-k:]
     top_k_indices = top_k_indices[np.argsort(perturbed[top_k_indices])[::-1]]
-    
+
     selected_actions = np.array([valid_actions[i] for i in top_k_indices])
     gumbel_values = gumbel_noise[top_k_indices]
-    
+
     return selected_actions, gumbel_values
 
 
@@ -192,6 +197,7 @@ def sequential_halving(
         for _ in range(sims_this_phase):
             for action in remaining_actions:
                 action = int(action)
+                # Expand node if not yet expanded
                 if action not in root.children or root.children[action].env is None:
                     child_env = copy_env(root.env)
                     i, j = action // num_polys, action % num_polys
@@ -213,22 +219,34 @@ def sequential_halving(
                         is_terminal=terminated,
                         prior=existing_prior,
                     )
+                    # Backup the bootstrapped value for newly expanded node
+                    child = root.children[action]
+                    child.visit_count += 1
+                    bootstrapped_value = reward + config.gamma * child_value
+                    child.value_sum += bootstrapped_value
+                else:
+                    # For already expanded nodes, backup using current Q-value
+                    child = root.children[action]
+                    child.visit_count += 1
+                    child.value_sum += child.reward + config.gamma * child.q_value
 
-                child = root.children[action]
-                child.visit_count += 1
-                child.value_sum += child.reward + config.gamma * child.q_value
-
-        q_values = np.array([
-            root.children[int(a)].q_value if int(a) in root.children else 0.0
-            for a in remaining_actions
-        ])
-        visit_counts = np.array([
-            root.children[int(a)].visit_count if int(a) in root.children else 0
-            for a in remaining_actions
-        ])
+        q_values = np.array(
+            [
+                root.children[int(a)].q_value if int(a) in root.children else 0.0
+                for a in remaining_actions
+            ]
+        )
+        visit_counts = np.array(
+            [
+                root.children[int(a)].visit_count if int(a) in root.children else 0
+                for a in remaining_actions
+            ]
+        )
 
         logits = np.zeros(len(remaining_actions))
-        sigma_values = sigma(logits, q_values, visit_counts, config.c_visit, config.c_scale)
+        sigma_values = sigma(
+            logits, q_values, visit_counts, config.c_visit, config.c_scale
+        )
 
         scores = remaining_gumbels + sigma_values
 
@@ -324,9 +342,7 @@ class GumbelMuZeroSearch:
         )
 
         policy = np.zeros(num_polys * num_polys, dtype=np.float32)
-        total_visits = sum(
-            child.visit_count for child in root.children.values()
-        )
+        total_visits = sum(child.visit_count for child in root.children.values())
 
         if total_visits > 0:
             for action, child in root.children.items():

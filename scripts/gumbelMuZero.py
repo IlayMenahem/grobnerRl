@@ -31,7 +31,7 @@ if __name__ == "__main__":
     multiple = 4.55
     num_clauses = int(num_vars * multiple)
 
-    pretrained_checkpoint_path: str | None = os.path.join("models", "checkpoints", "best.eqx")
+    pretrained_checkpoint_path: str | None = os.path.join("models", "checkpoints_LML", "best.eqx")
 
     model_config = ModelConfig(
         monomials_dim=num_vars + 1,

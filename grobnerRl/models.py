@@ -454,7 +454,7 @@ class GrobnerPolicyValue(Module):
         polynomial_embedder = PolynomialEmbedder(
             input_dim=config.monoms_embedding_dim,
             hidden_dim=config.polys_embedding_dim,
-            hidden_layers=2,
+            hidden_layers=1,
             output_dim=config.polys_embedding_dim,
             key=k_polynomial,
         )

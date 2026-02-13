@@ -11,7 +11,7 @@ from grain.transforms import Batch
 from grobnerRl.data import JsonDatasource, generate_expert_data
 from grobnerRl.envs.env import BuchbergerEnv
 from grobnerRl.envs.ideals import SAT3IdealGenerator
-from grobnerRl.experts import BasicExpert, LowestLMExpert
+from grobnerRl.experts import BasicExpert
 from grobnerRl.models import GrobnerPolicyValue, ModelConfig
 from grobnerRl.training.supervised import (
     batch_fn,
@@ -27,7 +27,7 @@ if __name__ == "__main__":
     ideal_dist = f"{num_vars}-{num_clauses}_sat3"
     ideal_gen = SAT3IdealGenerator(num_vars, num_clauses)
     data_path = os.path.join("data", f"{ideal_dist}.json")
-    checkpoint_dir = os.path.join("models", f"checkpoints_{num_vars}")
+    checkpoint_dir = os.path.join("models", f"checkpoints")
 
     num_epochs = 100
     batch_size = 128
@@ -38,8 +38,8 @@ if __name__ == "__main__":
     monomials_dim = num_vars + 1
     monoms_embedding_dim = 64
     polys_embedding_dim = 128
-    ideal_depth = 4
-    ideal_num_heads = 8
+    ideal_depth = 2
+    ideal_num_heads = 2
     value_hidden_dim = 128
 
     config = ModelConfig(
@@ -58,7 +58,7 @@ if __name__ == "__main__":
     optimizer = optax.nadam(learning_rate)
 
     env = BuchbergerEnv(ideal_gen)
-    expert_policy = LowestLMExpert(env)
+    expert_policy = BasicExpert(env)
 
     if not os.path.exists(data_path):
         generate_expert_data(env, dataset_size, data_path, expert_policy)
@@ -117,7 +117,7 @@ if __name__ == "__main__":
         SAT3IdealGenerator(num_vars, num_clauses), mode="train"
     )
     eval_expert_env = BuchbergerEnv(SAT3IdealGenerator(num_vars, num_clauses))
-    eval_expert = LowestLMExpert(eval_expert_env)
+    eval_expert = BasicExpert(eval_expert_env)
     episodes = 100
 
     evaluate_policy(model, eval_policy_env, eval_expert_env, eval_expert, episodes)
