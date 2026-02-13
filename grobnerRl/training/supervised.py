@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, Sequence
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -12,7 +12,72 @@ from tqdm import tqdm
 from grobnerRl.envs.env import BuchbergerEnv
 from grobnerRl.experts import Expert
 from grobnerRl.training.utils import save_checkpoint
+from grobnerRl.types import Action, Observation
 
+
+def batch_fn(
+    x: Sequence[tuple[Observation, Action, float]],
+) -> tuple[dict, Array, Array, Array]:
+    observations, actions, values = zip(*x)
+    batch_size: int = len(observations)
+
+    # 1. Calculate dimensions
+    max_polys: int = max(len(obs[0]) for obs in observations)
+    max_monoms: int = max(max(len(p) for p in obs[0]) for obs in observations)
+    num_vars = len(observations[0][0][0][0])
+
+    # 2. Allocate buffers
+    batched_ideals: np.ndarray = np.zeros(
+        (batch_size, max_polys, max_monoms, num_vars), dtype=np.float32
+    )
+    batched_monomial_masks: np.ndarray = np.zeros(
+        (batch_size, max_polys, max_monoms), dtype=bool
+    )
+    batched_poly_masks: np.ndarray = np.zeros((batch_size, max_polys), dtype=bool)
+    batched_selectables: np.ndarray = np.full(
+        (batch_size, max_polys, max_polys), -np.inf, dtype=np.float32
+    )
+
+    batched_actions: list[int] = []
+    loss_mask: list[float] = []
+
+    for i, (ideal, selectables) in enumerate(observations):
+        num_polys = len(ideal)
+        batched_poly_masks[i, :num_polys] = True
+
+        for j, poly in enumerate(ideal):
+            p_len = len(poly)
+            batched_ideals[i, j, :p_len] = poly
+            batched_monomial_masks[i, j, :p_len] = True
+
+        if selectables:
+            rows, cols = zip(*selectables)
+            batched_selectables[i, rows, cols] = 0.0
+
+            # Remap action index
+            r, c = divmod(actions[i], num_polys)
+            batched_actions.append(r * max_polys + c)
+            loss_mask.append(1.0)
+        else:
+            batched_selectables[i, 0, 0] = 0.0
+            batched_actions.append(0)
+            loss_mask.append(0.0)
+
+    batched_obs = {
+        "ideals": batched_ideals,
+        "monomial_masks": batched_monomial_masks,
+        "poly_masks": batched_poly_masks,
+        "selectables": batched_selectables,
+    }
+
+    batched_values = jnp.array([float(v) for v in values], dtype=jnp.float32)
+
+    return (
+        batched_obs,
+        jnp.array(batched_actions, dtype=jnp.int32),
+        batched_values,
+        jnp.array(loss_mask, dtype=jnp.float32),
+    )
 
 
 def train_model(
@@ -69,7 +134,11 @@ def train_model(
 
     @eqx.filter_jit
     def eval_step(
-        model: Module, observations: dict, actions: Array, values: Array, loss_mask: Array
+        model: Module,
+        observations: dict,
+        actions: Array,
+        values: Array,
+        loss_mask: Array,
     ) -> tuple[Array, Array]:
         loss, acc = loss_and_accuracy(model, observations, actions, values, loss_mask)
         return loss, acc
@@ -183,7 +252,9 @@ def loss_and_accuracy(
     """
     policy_logits, pred_values = eqx.filter_vmap(model)(observations)
 
-    per_sample_policy_loss = optax.softmax_cross_entropy_with_integer_labels(policy_logits, actions)
+    per_sample_policy_loss = optax.softmax_cross_entropy_with_integer_labels(
+        policy_logits, actions
+    )
 
     per_sample_value_loss = optax.huber_loss(pred_values, values)
 
@@ -230,7 +301,7 @@ def evaluate_policy(
         done = False
 
         while not done:
-            if hasattr(policy, 'extractor'):
+            if hasattr(policy, "extractor"):
                 logits, _ = policy(obs)
             else:
                 logits = policy(obs)
@@ -266,4 +337,3 @@ def evaluate_policy(
     return np.array(model_rewards, dtype=np.float32), np.array(
         expert_rewards, dtype=np.float32
     )
-

@@ -1,9 +1,6 @@
 import os
-from typing import Sequence
 
 import jax
-import jax.numpy as jnp
-from jaxtyping import Array
 import numpy as np
 import optax
 from grain import DataLoader
@@ -16,76 +13,14 @@ from grobnerRl.envs.env import BuchbergerEnv
 from grobnerRl.envs.ideals import SAT3IdealGenerator
 from grobnerRl.experts import BasicExpert, LowestLMExpert
 from grobnerRl.models import GrobnerPolicyValue, ModelConfig
-from grobnerRl.types import Action, Observation
-from grobnerRl.training.supervised import train_model, evaluate_policy, loss_and_accuracy
-
+from grobnerRl.training.supervised import (
+    batch_fn,
+    evaluate_policy,
+    loss_and_accuracy,
+    train_model,
+)
 
 if __name__ == "__main__":
-
-    def batch_fn(
-        x: Sequence[tuple[Observation, Action, float]],
-    ) -> tuple[dict, Array, Array, Array]:
-        observations, actions, values = zip(*x)
-        batch_size: int = len(observations)
-
-        # 1. Calculate dimensions
-        max_polys: int = max(len(obs[0]) for obs in observations)
-        max_monoms: int = max(max(len(p) for p in obs[0]) for obs in observations)
-        num_vars = len(observations[0][0][0][0])
-
-        # 2. Allocate buffers
-        batched_ideals: np.ndarray = np.zeros(
-            (batch_size, max_polys, max_monoms, num_vars), dtype=np.float32
-        )
-        batched_monomial_masks: np.ndarray = np.zeros(
-            (batch_size, max_polys, max_monoms), dtype=bool
-        )
-        batched_poly_masks: np.ndarray = np.zeros((batch_size, max_polys), dtype=bool)
-        batched_selectables: np.ndarray = np.full(
-            (batch_size, max_polys, max_polys), -np.inf, dtype=np.float32
-        )
-
-        batched_actions: list[int] = []
-        loss_mask: list[float] = []
-
-        for i, (ideal, selectables) in enumerate(observations):
-            num_polys = len(ideal)
-            batched_poly_masks[i, :num_polys] = True
-
-            for j, poly in enumerate(ideal):
-                p_len = len(poly)
-                batched_ideals[i, j, :p_len] = poly
-                batched_monomial_masks[i, j, :p_len] = True
-
-            if selectables:
-                rows, cols = zip(*selectables)
-                batched_selectables[i, rows, cols] = 0.0
-
-                # Remap action index
-                r, c = divmod(actions[i], num_polys)
-                batched_actions.append(r * max_polys + c)
-                loss_mask.append(1.0)
-            else:
-                batched_selectables[i, 0, 0] = 0.0
-                batched_actions.append(0)
-                loss_mask.append(0.0)
-
-        batched_obs = {
-            "ideals": batched_ideals,
-            "monomial_masks": batched_monomial_masks,
-            "poly_masks": batched_poly_masks,
-            "selectables": batched_selectables,
-        }
-
-        batched_values = jnp.array([float(v) for v in values], dtype=jnp.float32)
-
-        return (
-            batched_obs,
-            jnp.array(batched_actions, dtype=jnp.int32),
-            batched_values,
-            jnp.array(loss_mask, dtype=jnp.float32),
-        )
-
     num_vars = 5
     multiple = 4.55
     num_clauses = int(num_vars * multiple)
@@ -134,7 +69,9 @@ if __name__ == "__main__":
     train_indices = indices[:split].tolist()
     val_indices = indices[split:].tolist()
 
-    val_datasource = JsonDatasource(data_path, "states", ["actions", "values"], indices=val_indices)
+    val_datasource = JsonDatasource(
+        data_path, "states", ["actions", "values"], indices=val_indices
+    )
     train_datasource = JsonDatasource(
         data_path, "states", ["actions", "values"], indices=train_indices
     )
@@ -162,7 +99,8 @@ if __name__ == "__main__":
         worker_buffer_size=4,
     )
 
-    model, losses_train, accuracy_train, losses_validation, accuracy_validation = train_model(
+    model, losses_train, accuracy_train, losses_validation, accuracy_validation = (
+        train_model(
             policy,
             train_dataloader,
             val_dataloader,
@@ -171,8 +109,9 @@ if __name__ == "__main__":
             loss_and_accuracy,
             checkpoint_dir,
             early_stopping_patience,
-            min_delta
+            min_delta,
         )
+    )
 
     eval_policy_env = BuchbergerEnv(
         SAT3IdealGenerator(num_vars, num_clauses), mode="train"
