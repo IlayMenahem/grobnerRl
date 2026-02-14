@@ -754,7 +754,6 @@ def run_self_play_episode(
     env: BuchbergerEnv,
     config: GumbelMuZeroConfig,
     key: PRNGKeyArray,
-    poly_cache,
 ) -> list[Experience]:
     """
     Run a single self-play episode using Gumbel MuZero search.
@@ -768,7 +767,6 @@ def run_self_play_episode(
         env: Environment for the episode.
         config: Gumbel MuZero configuration.
         key: JAX random key.
-        poly_cache: Polynomial cache for experience compression.
 
     Returns:
         List of experiences with improved policies and discounted returns.
@@ -789,12 +787,14 @@ def run_self_play_episode(
             env, subkey, return_selected_action=True
         )
 
-        exp = Experience.from_uncompressed(
-            observation=current_obs,
-            policy=policy,
+        # Create uncompressed experience directly
+        ideal, selectables = current_obs
+        exp = Experience(
+            ideal=tuple(poly.astype(np.float32) if poly.dtype != np.float32 else poly for poly in ideal),
+            selectables=tuple(tuple(pair) for pair in selectables) if isinstance(selectables, list) else selectables,
+            policy=policy.astype(np.float32),
             value=0.0,
             num_polys=num_polys,
-            poly_cache=poly_cache,
         )
         experiences.append(exp)
 
@@ -837,7 +837,6 @@ def generate_self_play_data(
     num_episodes: int,
     config: GumbelMuZeroConfig,
     key: PRNGKeyArray,
-    poly_cache,
 ) -> list[Experience]:
     """Generate self-play data from multiple episodes."""
     from tqdm import tqdm
@@ -846,7 +845,7 @@ def generate_self_play_data(
 
     for episode in tqdm(range(num_episodes), desc="Self-play"):
         key, subkey = jax.random.split(key)
-        experiences = run_self_play_episode(model, env, config, subkey, poly_cache)
+        experiences = run_self_play_episode(model, env, config, subkey)
         all_experiences.extend(experiences)
 
     return all_experiences

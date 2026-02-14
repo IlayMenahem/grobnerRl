@@ -17,6 +17,7 @@ setup(
         'matplotlib',
         'sympy',
         'torch',
+        'grain-python',
         'implementations @ git+https://github.com/IlayMenahem/implementations',
     ],
     classifiers=[

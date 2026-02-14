@@ -19,11 +19,10 @@ from grobnerRl.training.gumbelMuZero import (
     generate_self_play_data,
 )
 from grobnerRl.training.shared import (
-    ReplayBuffer,
+    GrainReplayBuffer,
     TrainConfig,
     evaluate_model,
     train_policy_value,
-    PolynomialCache,
 )
 from grobnerRl.training.utils import save_checkpoint
 
@@ -32,7 +31,7 @@ if __name__ == "__main__":
     multiple = 4.55
     num_clauses = int(num_vars * multiple)
 
-    pretrained_checkpoint_path: str | None = None # os.path.join("models", "checkpoints", "best.eqx")
+    pretrained_checkpoint_path: str | None = os.path.join("models", "checkpoints", "best.eqx")
 
     monomials_dim = num_vars + 1
     monoms_embedding_dim = 64
@@ -64,6 +63,8 @@ if __name__ == "__main__":
         num_epochs_per_iteration=2,
         policy_loss_weight=1.0,
         value_loss_weight=1.0,
+        worker_count=2,
+        worker_buffer_size=4,
     )
 
     num_iterations = 50
@@ -95,8 +96,12 @@ if __name__ == "__main__":
         key, k_model = jax.random.split(key)
         model = GrobnerPolicyValue.from_scratch(config=model_config, key=k_model)
 
-    poly_cache = PolynomialCache()
-    replay_buffer = ReplayBuffer(max_size=replay_buffer_size, poly_cache=poly_cache)
+    replay_buffer = GrainReplayBuffer(
+        max_size=replay_buffer_size,
+        storage_dir=os.path.join(checkpoint_dir, "replay_buffer"),
+        worker_count=train_config.worker_count,
+        worker_buffer_size=train_config.worker_buffer_size,
+    )
 
     print("\nStarting Gumbel MuZero training...")
     print(f"  Iterations: {num_iterations}")
@@ -117,7 +122,7 @@ if __name__ == "__main__":
         print("\nGenerating self-play data...")
         key, subkey = jax.random.split(key)
         experiences = generate_self_play_data(
-            model, env, episodes_per_iteration, gumbel_config, subkey, poly_cache
+            model, env, episodes_per_iteration, gumbel_config, subkey
         )
         print(f"Generated {len(experiences)} experiences")
 

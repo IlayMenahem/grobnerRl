@@ -1,10 +1,18 @@
-"""Shared training utilities for RL algorithms with memory-efficient experience storage."""
+"""Shared training utilities for RL algorithms with Grain-based experience storage."""
 
+import json
+import os
+import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
-import sys
-from typing import Dict
+from typing import Iterator
 
 import equinox as eqx
+import grain.python as grain
+from grain import DataLoader
+from grain.samplers import IndexSampler
+from grain.sharding import ShardOptions
+from grain.transforms import Batch
 import jax.numpy as jnp
 import numpy as np
 import optax
@@ -14,148 +22,15 @@ from grobnerRl.envs.env import BuchbergerEnv, make_obs
 from grobnerRl.models import GrobnerPolicyValue
 
 
-class PolynomialCache:
-    """Cache for deduplicating polynomials with reference counting."""
-    
-    def __init__(self):
-        self._cache: list[np.ndarray] = []
-        self._hash_to_idx: Dict[bytes, int] = {}
-        self._ref_counts: list[int] = []
-        self._free_slots: list[int] = []
-    
-    def add_polynomial(self, poly: np.ndarray) -> int:
-        """Add polynomial and return index. Increments ref count."""
-        poly_hash = poly.tobytes()
-        
-        if poly_hash in self._hash_to_idx:
-            idx = self._hash_to_idx[poly_hash]
-            self._ref_counts[idx] += 1
-            return idx
-        
-        if self._free_slots:
-            idx = self._free_slots.pop()
-            self._cache[idx] = poly
-            self._ref_counts[idx] = 1
-        else:
-            idx = len(self._cache)
-            self._cache.append(poly)
-            self._ref_counts.append(1)
-        
-        self._hash_to_idx[poly_hash] = idx
-        return idx
-    
-    def remove_reference(self, idx: int) -> None:
-        """Decrement ref count. Free slot if count reaches zero."""
-        if idx >= len(self._ref_counts):
-            return
-        
-        self._ref_counts[idx] -= 1
-        if self._ref_counts[idx] <= 0:
-            poly_hash = self._cache[idx].tobytes()
-            del self._hash_to_idx[poly_hash]
-            self._cache[idx] = None  # type: ignore
-            self._free_slots.append(idx)
-    
-    def get_polynomial(self, idx: int) -> np.ndarray:
-        """Get polynomial by index."""
-        return self._cache[idx]
-    
-    def __len__(self) -> int:
-        return len(self._cache) - len(self._free_slots)
-    
-    def memory_usage(self) -> int:
-        """Total memory of active polynomials."""
-        return sum(poly.nbytes for poly in self._cache if poly is not None)
-
-
 @dataclass
 class Experience:
-    """Compressed experience with sparse policy and deduplicated polynomials."""
+    """Uncompressed experience for Grain-based replay buffer."""
     
-    poly_indices: tuple[int, ...]
+    ideal: tuple[np.ndarray, ...]  # Raw polynomials
     selectables: tuple[tuple[int, int], ...]
-    policy_indices: np.ndarray
-    policy_values: np.ndarray
+    policy: np.ndarray  # Dense policy array
     value: float
     num_polys: int
-    
-    @staticmethod
-    def from_uncompressed(
-        observation: tuple,
-        policy: np.ndarray,
-        value: float,
-        num_polys: int,
-        poly_cache: PolynomialCache,
-    ) -> "Experience":
-        """Create compressed experience from uncompressed data."""
-        ideal, selectables = observation
-        
-        poly_indices = tuple(
-            poly_cache.add_polynomial(
-                poly.astype(np.float32) if poly.dtype != np.float32 else poly
-            )
-            for poly in ideal
-        )
-        
-        if isinstance(selectables, list):
-            selectables = tuple(tuple(pair) for pair in selectables)
-        
-        nonzero_indices = np.nonzero(policy)[0]
-        policy_indices = nonzero_indices.astype(np.int32)
-        policy_values = policy[nonzero_indices].astype(np.float32)
-        
-        return Experience(
-            poly_indices=poly_indices,
-            selectables=selectables,
-            policy_indices=policy_indices,
-            policy_values=policy_values,
-            value=float(value),
-            num_polys=num_polys,
-        )
-    
-    def get_ideal(self, poly_cache: PolynomialCache) -> tuple[np.ndarray, ...]:
-        """Reconstruct ideal from polynomial indices."""
-        return tuple(poly_cache.get_polynomial(idx) for idx in self.poly_indices)
-    
-    def observation(self, poly_cache: PolynomialCache) -> tuple:
-        """Reconstruct observation tuple."""
-        return (self.get_ideal(poly_cache), self.selectables)
-    
-    @property
-    def policy(self) -> np.ndarray:
-        """Reconstruct dense policy array."""
-        policy = np.zeros(self.num_polys * self.num_polys, dtype=np.float32)
-        policy[self.policy_indices] = self.policy_values
-        return policy
-    
-    def memory_usage(self, poly_cache: PolynomialCache, count_polys: bool = True) -> int:
-        """Estimate memory usage in bytes."""
-        total = sys.getsizeof(self.poly_indices) + len(self.poly_indices) * 8
-        
-        if count_polys:
-            for idx in self.poly_indices:
-                total += poly_cache.get_polynomial(idx).nbytes
-        
-        total += sys.getsizeof(self.selectables)
-        total += sum(sys.getsizeof(pair) for pair in self.selectables)
-        total += self.policy_indices.nbytes + self.policy_values.nbytes
-        total += sys.getsizeof(self.value) + sys.getsizeof(self.num_polys)
-        
-        return total
-    
-    def compression_ratio(self, poly_cache: PolynomialCache) -> float:
-        """Compression ratio vs uncompressed format."""
-        compressed = self.memory_usage(poly_cache, count_polys=True)
-        
-        uncompressed = sum(
-            poly_cache.get_polynomial(idx).nbytes for idx in self.poly_indices
-        )
-        uncompressed += sys.getsizeof(self.selectables)
-        uncompressed += sum(sys.getsizeof(pair) for pair in self.selectables)
-        uncompressed += (self.num_polys ** 2) * 4
-        uncompressed += sys.getsizeof(self.value) + sys.getsizeof(self.num_polys)
-        
-        return compressed / uncompressed if uncompressed > 0 else 1.0
 
 
 @dataclass
@@ -167,92 +42,249 @@ class TrainConfig:
     num_epochs_per_iteration: int = 3
     policy_loss_weight: float = 1.0
     value_loss_weight: float = 1.0
+    worker_count: int = 1
+    worker_buffer_size: int = 4
 
 
-class ReplayBuffer:
-    """Replay buffer with polynomial deduplication and automatic cleanup."""
+def _serialize_experience(exp: Experience) -> dict:
+    """Serialize an Experience to a JSON-compatible dict."""
+    return {
+        "ideal": [poly.tolist() for poly in exp.ideal],
+        "selectables": list(exp.selectables),
+        "policy": exp.policy.tolist(),
+        "value": float(exp.value),
+        "num_polys": int(exp.num_polys),
+    }
 
-    def __init__(self, max_size: int = 100000, poly_cache: PolynomialCache | None = None):
+
+def _deserialize_experience(data: dict) -> Experience:
+    """Deserialize an Experience from a JSON dict."""
+    return Experience(
+        ideal=tuple(np.array(poly, dtype=np.float32) for poly in data["ideal"]),
+        selectables=tuple(tuple(pair) for pair in data["selectables"]),
+        policy=np.array(data["policy"], dtype=np.float32),
+        value=float(data["value"]),
+        num_polys=int(data["num_polys"]),
+    )
+
+
+class ExperienceDataSource(grain.RandomAccessDataSource):
+    """Grain data source for experiences stored in compressed JSON file."""
+    
+    def __init__(self, storage_path: str):
+        """
+        Initialize data source from storage file.
+        
+        Args:
+            storage_path: Path to JSON file containing experiences
+        """
+        self.storage_path = storage_path
+        self._length = 0
+        
+        # Load experiences if file exists
+        if os.path.exists(storage_path):
+            with open(storage_path, "r") as f:
+                data = json.load(f)
+                self._length = len(data.get("experiences", []))
+    
+    def __len__(self) -> int:
+        return self._length
+    
+    def __getitem__(self, index) -> Experience:
+        if isinstance(index, slice):
+            raise TypeError("Slicing not supported, use individual indices")
+        
+        # Load the entire file and get the specific experience
+        # This is inefficient but works with Grain's multi-worker setup
+        with open(self.storage_path, "r") as f:
+            data = json.load(f)
+            experiences = data["experiences"]
+            return _deserialize_experience(experiences[int(index)])
+
+
+class GrainReplayBuffer:
+    """Grain-based replay buffer using file storage and IndexSampler."""
+
+    def __init__(
+        self,
+        max_size: int = 100000,
+        storage_dir: str | None = None,
+        worker_count: int = 1,
+        worker_buffer_size: int = 4,
+    ):
+        """
+        Initialize replay buffer with file-based storage.
+        
+        Args:
+            max_size: Maximum number of experiences to store
+            storage_dir: Directory to store experience files (uses temp dir if None)
+            worker_count: Number of workers for data loading
+            worker_buffer_size: Buffer size per worker
+        """
         self.max_size = max_size
-        self.buffer: list[Experience] = []
-        self.position = 0
-        self.poly_cache = poly_cache if poly_cache is not None else PolynomialCache()
+        self.worker_count = worker_count
+        self.worker_buffer_size = worker_buffer_size
+        
+        # Setup storage
+        if storage_dir is None:
+            self._temp_dir = tempfile.mkdtemp(prefix="grain_replay_")
+            self.storage_dir = self._temp_dir
+        else:
+            self.storage_dir = storage_dir
+            os.makedirs(storage_dir, exist_ok=True)
+            self._temp_dir = None
+        
+        self.storage_path = os.path.join(self.storage_dir, "experiences.json")
+        
+        # Initialize with empty file
+        if not os.path.exists(self.storage_path):
+            with open(self.storage_path, "w") as f:
+                json.dump({"experiences": []}, f)
+        
+        self._data_source = ExperienceDataSource(self.storage_path)
+        self._current_epoch = 0
+        self._experiences_buffer: list[dict] = []
+        
+        # Track FIFO position for circular buffer
+        self._position = 0
+        self._is_full = False
 
     def add(self, experiences: list[Experience]) -> None:
-        """Add experiences to buffer. Cleans up old experiences when full."""
+        """Add experiences to buffer with FIFO eviction when full."""
+        # Load existing experiences
+        with open(self.storage_path, "r") as f:
+            data = json.load(f)
+            stored_exps = data["experiences"]
+        
+        # Add new experiences with FIFO eviction
         for exp in experiences:
-            if len(self.buffer) < self.max_size:
-                self.buffer.append(exp)
+            serialized = _serialize_experience(exp)
+            
+            if not self._is_full and len(stored_exps) < self.max_size:
+                stored_exps.append(serialized)
             else:
-                old_exp = self.buffer[self.position]
-                for idx in old_exp.poly_indices:
-                    self.poly_cache.remove_reference(idx)
-                self.buffer[self.position] = exp
-            self.position = (self.position + 1) % self.max_size
+                # FIFO: replace oldest experience
+                self._is_full = True
+                stored_exps[self._position] = serialized
+                self._position = (self._position + 1) % self.max_size
+        
+        # Write back to file
+        with open(self.storage_path, "w") as f:
+            json.dump({"experiences": stored_exps}, f)
+        
+        # Update data source length
+        self._data_source._length = len(stored_exps)
+
+    def _create_dataloader(self, batch_size: int, shuffle: bool = True) -> DataLoader | None:
+        """Create Grain DataLoader with IndexSampler and multiple workers."""
+        if len(self._data_source) == 0:
+            return None
+        
+        # Recreate data source to get fresh file handle
+        data_source = ExperienceDataSource(self.storage_path)
+        
+        # Create IndexSampler with current epoch as seed
+        sampler = IndexSampler(
+            len(data_source),
+            shard_options=ShardOptions(0, 1, True),
+            shuffle=shuffle,
+            num_epochs=1,
+            seed=self._current_epoch if shuffle else 0,
+        )
+        
+        # Batch transformation
+        batch_transform = Batch(batch_size, drop_remainder=False, batch_fn=batch_experiences_grain)
+        
+        # Create DataLoader with workers
+        dataloader = DataLoader(
+            data_source=data_source,
+            sampler=sampler,
+            operations=(batch_transform,),
+            worker_count=self.worker_count,
+            worker_buffer_size=self.worker_buffer_size,
+        )
+        
+        if shuffle:
+            self._current_epoch += 1
+        
+        return dataloader
 
     def sample(self, batch_size: int) -> list[Experience]:
         """Sample random batch of experiences."""
+        if len(self._data_source) == 0:
+            return []
+        
         indices = np.random.choice(
-            len(self.buffer), size=min(batch_size, len(self.buffer)), replace=False
+            len(self._data_source), 
+            size=min(batch_size, len(self._data_source)), 
+            replace=False
         )
-        return [self.buffer[i] for i in indices]
+        return [self._data_source[int(i)] for i in indices]
     
     def sample_batched(self, batch_size: int) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
-        """Sample and batch experiences."""
-        return batch_experiences(self.sample(batch_size), self.poly_cache)
+        """Sample and batch experiences using Grain DataLoader with IndexSampler."""
+        dataloader = self._create_dataloader(batch_size=batch_size, shuffle=True)
+        
+        if dataloader is None:
+            return {}, np.array([]), np.array([]), np.array([])
+        
+        # Get first batch from dataloader
+        for batch in dataloader:
+            return batch
+        
+        # If no batch available, return empty
+        return {}, np.array([]), np.array([]), np.array([])
+    
+    def iter_dataset(self, batch_size: int, shuffle: bool = True) -> Iterator[tuple[dict, np.ndarray, np.ndarray, np.ndarray]]:
+        """
+        Create iterator over batches using Grain DataLoader.
+        
+        Useful for multiple epochs of training on the same data.
+        """
+        dataloader = self._create_dataloader(batch_size=batch_size, shuffle=shuffle)
+        
+        if dataloader is None:
+            return iter([])
+        
+        return iter(dataloader)
 
     def __len__(self) -> int:
-        return len(self.buffer)
+        return len(self._data_source)
     
-    def memory_usage(self) -> dict:
-        """Memory usage statistics including deduplication savings."""
-        if len(self.buffer) == 0:
-            return {
-                "total_bytes": 0,
-                "total_mb": 0.0,
-                "avg_bytes_per_experience": 0,
-                "avg_compression_ratio": 1.0,
-                "poly_cache_bytes": 0,
-                "poly_cache_mb": 0.0,
-                "unique_polynomials": 0,
-                "deduplication_ratio": 1.0,
-            }
-        
-        exp_bytes = sum(exp.memory_usage(self.poly_cache, count_polys=False) 
-                       for exp in self.buffer)
-        cache_bytes = self.poly_cache.memory_usage()
-        total_bytes = exp_bytes + cache_bytes
-        
-        total_poly_refs = sum(len(exp.poly_indices) for exp in self.buffer)
-        num_unique = len(self.poly_cache)
-        dedup_ratio = num_unique / total_poly_refs if total_poly_refs > 0 else 1.0
-        
-        avg_compression = np.mean([exp.compression_ratio(self.poly_cache) 
-                                   for exp in self.buffer])
-        
-        return {
-            "total_bytes": total_bytes,
-            "total_mb": total_bytes / (1024 * 1024),
-            "avg_bytes_per_experience": total_bytes / len(self.buffer),
-            "avg_compression_ratio": float(avg_compression),
-            "poly_cache_bytes": cache_bytes,
-            "poly_cache_mb": cache_bytes / (1024 * 1024),
-            "unique_polynomials": num_unique,
-            "deduplication_ratio": float(dedup_ratio),
-        }
+    def __del__(self):
+        """Cleanup temporary directory if created."""
+        if self._temp_dir is not None:
+            import shutil
+            try:
+                shutil.rmtree(self._temp_dir)
+            except Exception:
+                pass
+
+
+def batch_experiences_grain(
+    experiences: Sequence[Experience],
+) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Batch function for Grain DataLoader.
+    
+    Compatible with Grain's Batch transform.
+    """
+    return batch_experiences(list(experiences))
 
 
 def batch_experiences(
     experiences: list[Experience],
-    poly_cache: PolynomialCache,
 ) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
-    """Batch compressed experiences for training."""
+    """Batch uncompressed experiences for training."""
+    if not experiences:
+        return {}, np.array([]), np.array([]), np.array([])
+    
     batch_size = len(experiences)
     max_polys = max(exp.num_polys for exp in experiences)
     
-    first_ideal = experiences[0].get_ideal(poly_cache)
+    first_ideal = experiences[0].ideal
     max_monoms = max(
-        max(len(p) for p in exp.get_ideal(poly_cache)) for exp in experiences
+        max(len(p) for p in exp.ideal) for exp in experiences
     )
     num_vars = len(first_ideal[0][0])
 
@@ -269,7 +301,7 @@ def batch_experiences(
     loss_mask = np.ones(batch_size, dtype=np.float32)
 
     for i, exp in enumerate(experiences):
-        ideal = exp.get_ideal(poly_cache)
+        ideal = exp.ideal
         batched_poly_masks[i, :len(ideal)] = True
 
         for j, poly in enumerate(ideal):
@@ -281,10 +313,11 @@ def batch_experiences(
             rows, cols = zip(*exp.selectables)
             batched_selectables[i, rows, cols] = 0.0
 
-        for idx, val in zip(exp.policy_indices, exp.policy_values):
-            orig_i = idx // exp.num_polys
-            orig_j = idx % exp.num_polys
-            batched_policies[i, orig_i * max_polys + orig_j] = val
+        for idx in range(len(exp.policy)):
+            if exp.policy[idx] > 0:
+                orig_i = idx // exp.num_polys
+                orig_j = idx % exp.num_polys
+                batched_policies[i, orig_i * max_polys + orig_j] = exp.policy[idx]
 
         batched_values[i] = exp.value
 
@@ -338,13 +371,13 @@ def policy_value_loss(
 
 def train_policy_value(
     model: GrobnerPolicyValue,
-    replay_buffer: ReplayBuffer,
+    replay_buffer: GrainReplayBuffer,
     train_config: TrainConfig,
     optimizer: optax.GradientTransformation,
     opt_state: optax.OptState,
 ) -> tuple[GrobnerPolicyValue, optax.OptState, dict]:
     """
-    Train the model on replay buffer data.
+    Train the model on replay buffer data using Grain DataLoader.
 
     Args:
         model: The GrobnerPolicyValue model.
@@ -377,12 +410,13 @@ def train_policy_value(
         return model, opt_state, loss, metrics
 
     epoch_metrics = {"policy_loss": [], "value_loss": [], "total_loss": []}
-    num_batches = max(1, len(replay_buffer) // train_config.batch_size)
 
     for _ in range(train_config.num_epochs_per_iteration):
-        for _ in range(num_batches):
-            observations, target_policies, values, loss_mask = replay_buffer.sample_batched(train_config.batch_size)
-
+        # Use iter_dataset to iterate through all batches
+        for observations, target_policies, values, loss_mask in replay_buffer.iter_dataset(
+            batch_size=train_config.batch_size, shuffle=True
+        ):
+            # Convert to JAX arrays
             observations = {k: jnp.array(v) for k, v in observations.items()}
             target_policies = jnp.array(target_policies)
             values = jnp.array(values)
@@ -395,7 +429,7 @@ def train_policy_value(
             for k, v in metrics.items():
                 epoch_metrics[k].append(float(v))
 
-    mean_metrics = {k: np.mean(v) for k, v in epoch_metrics.items()}
+    mean_metrics = {k: np.mean(v) if v else 0.0 for k, v in epoch_metrics.items()}
     return model, opt_state, mean_metrics
 
 
