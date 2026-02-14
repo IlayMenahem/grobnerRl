@@ -22,6 +22,7 @@ References:
 
 from copy import copy
 from dataclasses import dataclass, field
+from typing import Literal, overload
 
 import equinox as eqx
 import jax
@@ -224,6 +225,9 @@ def expand_node(node: GumbelNode, model: GrobnerPolicyValue) -> None:
         node.network_value = 0.0
         node.valid_actions = []
         return
+
+    if node.env is None:
+        raise ValueError("expand_node requires node.env to be set")
 
     obs = make_obs(node.env.generators, node.env.pairs)
     policy_logits, value = jit_inference(model, obs)
@@ -617,11 +621,30 @@ class GumbelMuZeroSearch:
         self.env = env
         self.config = config
 
+    @overload
     def search(
         self,
         env: BuchbergerEnv,
         key: PRNGKeyArray,
+        return_selected_action: Literal[False] = False,
     ) -> tuple[np.ndarray, float]:
+        ...
+
+    @overload
+    def search(
+        self,
+        env: BuchbergerEnv,
+        key: PRNGKeyArray,
+        return_selected_action: Literal[True],
+    ) -> tuple[np.ndarray, float, int | None]:
+        ...
+
+    def search(
+        self,
+        env: BuchbergerEnv,
+        key: PRNGKeyArray,
+        return_selected_action: bool = False,
+    ) -> tuple[np.ndarray, float] | tuple[np.ndarray, float, int | None]:
         """
         Run Gumbel MuZero search from current state.
 
@@ -631,11 +654,15 @@ class GumbelMuZeroSearch:
         Args:
             env: Current environment state.
             key: JAX random key.
+            return_selected_action: If True, also return root action selected by
+                Sequential Halving (A_{n+1}) for acting in the environment.
 
         Returns:
             Tuple of (improved_policy, value):
                 - improved_policy: π' = softmax(logits + σ(completedQ)) (Eq. 11)
                 - value: Root value estimate from the neural network
+            If return_selected_action=True, returns:
+                - improved_policy, value, selected_action
         """
         num_polys = len(env.generators)
 
@@ -646,9 +673,14 @@ class GumbelMuZeroSearch:
         value = root.network_value
         policy_logits = root.policy_logits
         valid_actions = root.valid_actions
+        if policy_logits is None:
+            raise ValueError("Root expansion did not produce policy logits")
 
         if len(valid_actions) == 0:
-            return np.zeros(num_polys * num_polys), value
+            empty_policy = np.zeros(num_polys * num_polys)
+            if return_selected_action:
+                return empty_policy, value, None
+            return empty_policy, value
 
         # Initialize tree-wide min-max stats for Q-value normalization
         min_max_stats = MinMaxStats()
@@ -712,6 +744,8 @@ class GumbelMuZeroSearch:
         exp_logits = np.where(np.isinf(improved_logits), 0.0, exp_logits)
         policy = exp_logits / exp_logits.sum()
 
+        if return_selected_action:
+            return policy, value, selected_action
         return policy, value
 
 
@@ -726,7 +760,8 @@ def run_self_play_episode(
     Run a single self-play episode using Gumbel MuZero search.
 
     At each step, runs the full search to get the improved policy (used as
-    training target) and samples an action from it for exploration.
+    training target) and acts with the root action selected by Sequential
+    Halving (A_{n+1}).
 
     Args:
         model: Neural network model.
@@ -750,7 +785,9 @@ def run_self_play_episode(
         num_polys = len(env.generators)
 
         key, subkey = jax.random.split(key)
-        policy, _ = search.search(env, subkey)
+        policy, _, selected_action = search.search(
+            env, subkey, return_selected_action=True
+        )
 
         exp = Experience.from_uncompressed(
             observation=current_obs,
@@ -761,18 +798,20 @@ def run_self_play_episode(
         )
         experiences.append(exp)
 
-        # Sample action from improved policy for exploration
-        # (Gumbel noise across episodes provides diverse exploration)
-        policy_sum = policy.sum()
-        if policy_sum > 0:
-            normalized_policy = policy / policy_sum
+        # Act with the selected root action A_{n+1}. Fallback to policy sampling
+        # only if no action is selected (e.g., no valid actions).
+        if selected_action is not None:
+            action = int(selected_action)
         else:
-            valid_actions = get_valid_actions(env)
-            normalized_policy = np.zeros_like(policy)
-            for a in valid_actions:
-                normalized_policy[a] = 1.0 / len(valid_actions)
-
-        action = int(np.random.choice(len(policy), p=normalized_policy))
+            policy_sum = policy.sum()
+            if policy_sum > 0:
+                normalized_policy = policy / policy_sum
+            else:
+                valid_actions = get_valid_actions(env)
+                normalized_policy = np.zeros_like(policy)
+                for a in valid_actions:
+                    normalized_policy[a] = 1.0 / len(valid_actions)
+            action = int(np.random.choice(len(policy), p=normalized_policy))
         i, j = action // num_polys, action % num_polys
 
         _, reward, terminated, truncated, _ = env.step((i, j))
