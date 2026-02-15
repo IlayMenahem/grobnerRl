@@ -24,14 +24,14 @@ from grobnerRl.training.shared import (
     evaluate_model,
     train_policy_value,
 )
-from grobnerRl.training.utils import save_checkpoint
+from grobnerRl.training.utils import create_metrics_log_path, log_metrics, save_checkpoint
 
 if __name__ == "__main__":
     num_vars = 5
     multiple = 4.55
     num_clauses = int(num_vars * multiple)
 
-    pretrained_checkpoint_path: str | None = os.path.join("models", "checkpoints", "best.eqx")
+    pretrained_checkpoint_path: str | None = None # os.path.join("models", "checkpoints", "best.eqx")
 
     monomials_dim = num_vars + 1
     monoms_embedding_dim = 64
@@ -50,8 +50,8 @@ if __name__ == "__main__":
     )
 
     gumbel_config = GumbelMuZeroConfig(
-        num_simulations=9,
-        max_num_considered_actions=4,
+        num_simulations=17,
+        max_num_considered_actions=8,
         gamma=0.99,
         c_visit=50.0,
         c_scale=1.0,
@@ -60,19 +60,20 @@ if __name__ == "__main__":
     train_config = TrainConfig(
         learning_rate=5e-4,
         batch_size=64,
-        num_epochs_per_iteration=2,
+        num_epochs_per_iteration=1,
         policy_loss_weight=1.0,
         value_loss_weight=1.0,
-        worker_count=2,
+        worker_count=1,
         worker_buffer_size=4,
     )
 
-    num_iterations = 50
-    episodes_per_iteration = 3
-    replay_buffer_size = 2**14
+    num_iterations = 500
+    episodes_per_iteration = 1
+    replay_buffer_size = 2**12
     checkpoint_dir = os.path.join("models", "gumbel_muzero_checkpoints")
-    eval_interval = 5
-    eval_episodes = 100
+    logs_dir = "logs"
+    eval_interval = 10
+    eval_episodes = 25
 
     key = jax.random.key(42)
 
@@ -98,7 +99,7 @@ if __name__ == "__main__":
 
     replay_buffer = GrainReplayBuffer(
         max_size=replay_buffer_size,
-        storage_dir=os.path.join(checkpoint_dir, "replay_buffer"),
+        storage_dir="replay_buffer",
         worker_count=train_config.worker_count,
         worker_buffer_size=train_config.worker_buffer_size,
     )
@@ -110,6 +111,46 @@ if __name__ == "__main__":
     print(f"  Max considered actions: {gumbel_config.max_num_considered_actions}")
     print(f"  Replay buffer size: {replay_buffer_size}")
     print(f"  Checkpoint directory: {checkpoint_dir}")
+
+    hyperparameters = {
+        "num_vars": num_vars,
+        "multiple": multiple,
+        "num_clauses": num_clauses,
+        "model_config": {
+            "monomials_dim": model_config.monomials_dim,
+            "monoms_embedding_dim": model_config.monoms_embedding_dim,
+            "polys_embedding_dim": model_config.polys_embedding_dim,
+            "ideal_depth": model_config.ideal_depth,
+            "ideal_num_heads": model_config.ideal_num_heads,
+            "value_hidden_dim": model_config.value_hidden_dim,
+        },
+        "gumbel_config": {
+            "num_simulations": gumbel_config.num_simulations,
+            "max_num_considered_actions": gumbel_config.max_num_considered_actions,
+            "gamma": gumbel_config.gamma,
+            "c_visit": gumbel_config.c_visit,
+            "c_scale": gumbel_config.c_scale,
+        },
+        "train_config": {
+            "learning_rate": train_config.learning_rate,
+            "batch_size": train_config.batch_size,
+            "num_epochs_per_iteration": train_config.num_epochs_per_iteration,
+            "policy_loss_weight": train_config.policy_loss_weight,
+            "value_loss_weight": train_config.value_loss_weight,
+            "worker_count": train_config.worker_count,
+            "worker_buffer_size": train_config.worker_buffer_size,
+        },
+        "num_iterations": num_iterations,
+        "episodes_per_iteration": episodes_per_iteration,
+        "replay_buffer_size": replay_buffer_size,
+        "eval_interval": eval_interval,
+        "eval_episodes": eval_episodes,
+        "pretrained_checkpoint": pretrained_checkpoint_path,
+        "optimizer": "nadam",
+    }
+
+    metrics_log_path = create_metrics_log_path(logs_dir, hyperparameters)
+    print(f"  Metrics log file: {metrics_log_path}")
 
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
     best_reward = float("-inf")
@@ -129,6 +170,11 @@ if __name__ == "__main__":
         replay_buffer.add(experiences)
         print(f"Replay buffer size: {len(replay_buffer)}")
 
+        iteration_metrics = {
+            "num_experiences": len(experiences),
+            "replay_buffer_size": len(replay_buffer),
+        }
+
         metrics: dict = {}
         if len(replay_buffer) >= train_config.batch_size:
             print("\nTraining...")
@@ -140,6 +186,8 @@ if __name__ == "__main__":
                 f"Value loss: {metrics['value_loss']:.4f}, "
                 f"Total loss: {metrics['total_loss']:.4f}"
             )
+
+            iteration_metrics.update(metrics)
 
             if checkpoint_dir:
                 save_checkpoint(
@@ -153,15 +201,22 @@ if __name__ == "__main__":
                 f"  Mean reward: {eval_metrics['mean_reward']:.2f} +/- {eval_metrics['std_reward']:.2f}, "
                 f"Mean length: {eval_metrics['mean_length']:.1f}"
             )
+            
+            iteration_metrics.update(eval_metrics)
 
             if eval_metrics["mean_reward"] > best_reward:
                 best_reward = eval_metrics["mean_reward"]
+                iteration_metrics["is_best"] = True
                 if checkpoint_dir:
                     combined_metrics = {**metrics, **eval_metrics}
                     save_checkpoint(
                         model, opt_state, checkpoint_dir, "best_gumbel_muzero", iteration + 1, combined_metrics
                     )
                     print(f"  Saved new best model (reward: {best_reward:.2f})")
+            else:
+                iteration_metrics["is_best"] = False
+
+        log_metrics(iteration_metrics, metrics_log_path, iteration + 1)
 
     print(f"\nTraining complete. Best reward: {best_reward:.2f}")
     print("\nDone!")

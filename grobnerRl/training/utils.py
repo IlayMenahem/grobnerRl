@@ -1,4 +1,7 @@
+import json
 import os
+from datetime import datetime
+from typing import Any
 
 import equinox as eqx
 import optax
@@ -55,3 +58,63 @@ def save_checkpoint(
     with open(ckpt_path, "wb") as f:
         eqx.tree_serialise_leaves(f, payload)
     return ckpt_path
+
+
+def create_metrics_log_path(
+    base_dir: str = "logs", hyperparameters: dict[str, Any] | None = None
+) -> str:
+    """
+    Create a unique JSON file path for logging metrics with hyperparameters.
+
+    Args:
+        base_dir: Base directory for log files.
+        hyperparameters: Dictionary of hyperparameters for this training run.
+
+    Returns:
+        Path to the new metrics log file.
+    """
+    os.makedirs(base_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_path = os.path.join(base_dir, f"metrics_{timestamp}.json")
+    
+    initial_data = {
+        "hyperparameters": hyperparameters or {},
+        "run_timestamp": timestamp,
+        "metrics": [],
+    }
+    with open(file_path, "w") as f:
+        json.dump(initial_data, f, indent=2)
+    
+    return file_path
+
+
+def log_metrics(metrics: dict[str, Any], file_path: str, iteration: int) -> None:
+    """
+    Append metrics to a JSON log file.
+
+    Args:
+        metrics: Dictionary of metrics to log.
+        file_path: Path to the JSON log file.
+        iteration: Current training iteration.
+    """
+    log_entry = {
+        "iteration": iteration,
+        "timestamp": datetime.now().isoformat(),
+        **metrics,
+    }
+    
+    if os.path.exists(file_path):
+        with open(file_path, "r") as f:
+            data = json.load(f)
+    else:
+        data = {"hyperparameters": {}, "metrics": []}
+    
+    if "metrics" not in data:
+        data = {"hyperparameters": data.get("hyperparameters", {}), "metrics": []}
+    
+    data["metrics"].append(log_entry)
+    
+    with open(file_path, "w") as f:
+        json.dump(data, f, indent=2)
+    
+    print(f"Logged metrics to {file_path}")
