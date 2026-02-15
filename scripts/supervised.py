@@ -27,7 +27,7 @@ if __name__ == "__main__":
     ideal_dist = f"{num_vars}-{num_clauses}_sat3"
     ideal_gen = SAT3IdealGenerator(num_vars, num_clauses)
     data_path = os.path.join("data", f"{ideal_dist}.json")
-    checkpoint_dir = os.path.join("models", f"checkpoints")
+    checkpoint_dir = os.path.join("models", "checkpoints")
 
     num_epochs = 100
     batch_size = 128

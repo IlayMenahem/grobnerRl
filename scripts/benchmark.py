@@ -6,7 +6,7 @@ if __name__ == "__main__":
     from grobnerRl.benchmark.benchmark import benchmark_expert
     from grobnerRl.envs.env import BuchbergerEnv
     from grobnerRl.envs.ideals import SAT3IdealGenerator
-    from grobnerRl.experts import BasicExpert, ClosestLMExpert, LowestLMExpert
+    from grobnerRl.experts import BasicExpert
 
     num_vars = 3
     multiplier = None

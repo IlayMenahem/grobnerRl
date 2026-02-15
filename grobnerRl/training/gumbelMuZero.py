@@ -24,7 +24,6 @@ from copy import copy
 from dataclasses import dataclass, field
 from typing import Literal, overload
 
-import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
