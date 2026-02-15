@@ -6,14 +6,16 @@ import numpy as np
 import pytest
 import sympy as sp
 
-from grobnerRl.envs.env import BuchbergerEnv, make_obs
+from grobnerRl.envs.env import BuchbergerEnv
 from grobnerRl.envs.ideals import SAT3IdealGenerator
 from grobnerRl.models import GrobnerPolicyValue, ModelConfig
 from grobnerRl.training.gumbelMuZero import (
     GumbelMuZeroConfig,
     GumbelMuZeroSearch,
     GumbelNode,
+    MinMaxStats,
     copy_env,
+    expand_node,
     gumbel_top_k,
     run_self_play_episode,
     sample_gumbel,
@@ -105,37 +107,42 @@ def test_gumbel_top_k_diversity():
 
 def test_sigma_normalization():
     """Test sigma function normalization."""
-    logits = np.array([1.0, 2.0, 3.0])
     q_values = np.array([0.5, 1.0, 1.5])
     visit_counts = np.array([10, 20, 30])
     
-    sigma_vals = sigma(logits, q_values, visit_counts, c_visit=50.0, c_scale=1.0)
+    sigma_vals = sigma(q_values, visit_counts, c_visit=50.0, c_scale=1.0)
     
     # Should return finite values
     assert np.all(np.isfinite(sigma_vals))
+    # Sigma should scale Q-values by (c_visit + max_visit) * c_scale
+    expected_scale = (50.0 + 30) * 1.0
+    np.testing.assert_allclose(sigma_vals, expected_scale * q_values)
 
 
 def test_sigma_with_zero_visits():
     """Test sigma function with zero visits."""
-    logits = np.array([1.0, 2.0, 3.0])
     q_values = np.array([0.0, 0.0, 0.0])
     visit_counts = np.array([0, 0, 0])
     
-    sigma_vals = sigma(logits, q_values, visit_counts, c_visit=50.0, c_scale=1.0)
+    sigma_vals = sigma(q_values, visit_counts, c_visit=50.0, c_scale=1.0)
     
     # Should handle zero visits gracefully
     assert np.all(np.isfinite(sigma_vals))
+    # With zero visits, scale should be c_visit * c_scale
+    expected_scale = 50.0 * 1.0
+    np.testing.assert_allclose(sigma_vals, expected_scale * q_values)
 
 
 def test_sigma_with_equal_q_values():
     """Test sigma function with equal Q-values."""
-    logits = np.array([1.0, 2.0, 3.0])
     q_values = np.array([1.0, 1.0, 1.0])
     visit_counts = np.array([10, 20, 30])
     
-    sigma_vals = sigma(logits, q_values, visit_counts, c_visit=50.0, c_scale=1.0)
+    sigma_vals = sigma(q_values, visit_counts, c_visit=50.0, c_scale=1.0)
     
     assert np.all(np.isfinite(sigma_vals))
+    # All sigma values should be equal when Q-values are equal
+    assert np.allclose(sigma_vals, sigma_vals[0])
 
 
 def test_gumbel_node_q_value_zero_visits():
@@ -204,12 +211,21 @@ def test_sequential_halving_single_action():
     env.reset()
     
     root = GumbelNode(env=copy_env(env))
-    actions = np.array([0])
+    expand_node(root, model)
+    
+    # Use the first valid action from the expanded root
+    assert len(root.valid_actions) > 0, "Should have at least one valid action"
+    first_valid = root.valid_actions[0]
+    actions = np.array([first_valid])
     gumbel_values = np.array([1.0])
     
-    selected = sequential_halving(actions, gumbel_values, root, env, model, gumbel_config)
+    min_max_stats = MinMaxStats()
     
-    assert selected == 0
+    selected = sequential_halving(
+        actions, gumbel_values, root.policy_logits, root, model, gumbel_config, min_max_stats
+    )
+    
+    assert selected == first_valid
 
 
 def test_sequential_halving_two_actions():
@@ -225,16 +241,20 @@ def test_sequential_halving_two_actions():
     env.reset()
     
     root = GumbelNode(env=copy_env(env))
+    expand_node(root, model)
     
     # Get valid actions from the environment
-    num_polys = len(env.generators)
-    valid_actions = [i * num_polys + j for i, j in env.pairs]
+    valid_actions = root.valid_actions
+    
+    min_max_stats = MinMaxStats()
     
     if len(valid_actions) >= 2:
         actions = np.array(valid_actions[:2])
         gumbel_values = np.array([2.0, 1.0])
         
-        selected = sequential_halving(actions, gumbel_values, root, env, model, gumbel_config)
+        selected = sequential_halving(
+            actions, gumbel_values, root.policy_logits, root, model, gumbel_config, min_max_stats
+        )
         
         assert selected in actions
 
@@ -299,16 +319,14 @@ def test_self_play_episode_structure():
     env = BuchbergerEnv(ideal_gen, mode="train")
     
     key, subkey = jax.random.split(key)
-    from grobnerRl.training.shared import PolynomialCache
-    poly_cache = PolynomialCache()
-    experiences = run_self_play_episode(model, env, gumbel_config, subkey, poly_cache)
+    experiences = run_self_play_episode(model, env, gumbel_config, subkey)
     
     # Should have some experiences
     assert len(experiences) > 0
     
     # Check structure
     for exp in experiences:
-        assert hasattr(exp, 'observation')
+        assert hasattr(exp, 'ideal')
         assert hasattr(exp, 'policy')
         assert hasattr(exp, 'value')
         assert hasattr(exp, 'num_polys')
@@ -329,9 +347,7 @@ def test_self_play_return_calculation():
     env = BuchbergerEnv(ideal_gen, mode="train")
     
     key, subkey = jax.random.split(key)
-    from grobnerRl.training.shared import PolynomialCache
-    poly_cache = PolynomialCache()
-    experiences = run_self_play_episode(model, env, gumbel_config, subkey, poly_cache)
+    experiences = run_self_play_episode(model, env, gumbel_config, subkey)
     
     if len(experiences) > 1:
         # First experience should have highest return (most discounted future)
@@ -352,9 +368,7 @@ def test_self_play_policy_normalization():
     env = BuchbergerEnv(ideal_gen, mode="train")
     
     key, subkey = jax.random.split(key)
-    from grobnerRl.training.shared import PolynomialCache
-    poly_cache = PolynomialCache()
-    experiences = run_self_play_episode(model, env, gumbel_config, subkey, poly_cache)
+    experiences = run_self_play_episode(model, env, gumbel_config, subkey)
     
     # Check policies sum to reasonable values (may not be exactly 1 due to masking)
     for exp in experiences:
