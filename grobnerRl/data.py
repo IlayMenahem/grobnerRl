@@ -22,21 +22,14 @@ class JsonDatasource(RandomAccessDataSource[Union[tuple[Observation, Action], tu
         self,
         path: str,
         obs: str,
-        labels: str | Sequence[str],
+        labels: Sequence[str],
         indices: Sequence[int] | None = None,
     ):
         with open(path, "r") as f:
             dataset = json.load(f)
 
         self.states = dataset[obs]
-        
-        # Handle both single label and multiple labels
-        if isinstance(labels, str):
-            self.labels = [labels]
-            self.multi_label = False
-        else:
-            self.labels = list(labels)
-            self.multi_label = True
+        self.labels = labels
         
         # Load all label arrays
         self.label_data = [dataset[label] for label in self.labels]
@@ -52,12 +45,7 @@ class JsonDatasource(RandomAccessDataSource[Union[tuple[Observation, Action], tu
         state = self.states[idx]
         label_values = [label_data[idx] for label_data in self.label_data]
         
-        if not self.multi_label:
-            # Return (state, action) for backward compatibility
-            return (state, label_values[0])
-        else:
-            # Return (state, label1, label2, ...) for multiple labels
-            return (state, *label_values)
+        return (state, *label_values)
 
 
 class JsonDataset(Dataset):

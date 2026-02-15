@@ -203,12 +203,6 @@ def get_valid_actions(env: BuchbergerEnv) -> list[int]:
     return [i * num_polys + j for i, j in env.pairs]
 
 
-@eqx.filter_jit
-def jit_inference(model: GrobnerPolicyValue, obs: tuple) -> tuple[Array, Array]:
-    """JIT-compiled inference for a single observation."""
-    return model(obs)
-
-
 def expand_node(node: GumbelNode, model: GrobnerPolicyValue) -> None:
     """
     Evaluate the neural network at a node and initialize children with priors.
@@ -230,7 +224,7 @@ def expand_node(node: GumbelNode, model: GrobnerPolicyValue) -> None:
         raise ValueError("expand_node requires node.env to be set")
 
     obs = make_obs(node.env.generators, node.env.pairs)
-    policy_logits, value = jit_inference(model, obs)
+    policy_logits, value = model(obs)
 
     node.policy_logits = np.array(policy_logits)
     node.network_value = float(value)

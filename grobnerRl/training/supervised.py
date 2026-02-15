@@ -132,7 +132,6 @@ def train_model(
         model = eqx.apply_updates(model, updates)
         return model, opt_state, loss, acc
 
-    @eqx.filter_jit
     def eval_step(
         model: Module,
         observations: dict,

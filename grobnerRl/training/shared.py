@@ -69,7 +69,7 @@ def _deserialize_experience(data: dict) -> Experience:
 
 
 class ExperienceDataSource(grain.RandomAccessDataSource):
-    """Grain data source for experiences stored in compressed JSON file."""
+    """Grain data source for experiences stored in JSON file."""
     
     def __init__(self, storage_path: str):
         """
@@ -79,27 +79,23 @@ class ExperienceDataSource(grain.RandomAccessDataSource):
             storage_path: Path to JSON file containing experiences
         """
         self.storage_path = storage_path
-        self._length = 0
+        self.experiences = []
         
-        # Load experiences if file exists
+        # Load and deserialize all experiences if file exists
         if os.path.exists(storage_path):
             with open(storage_path, "r") as f:
                 data = json.load(f)
-                self._length = len(data.get("experiences", []))
+                raw_experiences = data.get("experiences", [])
+                self.experiences = [_deserialize_experience(exp) for exp in raw_experiences]
     
     def __len__(self) -> int:
-        return self._length
+        return len(self.experiences)
     
     def __getitem__(self, index) -> Experience:
         if isinstance(index, slice):
             raise TypeError("Slicing not supported, use individual indices")
         
-        # Load the entire file and get the specific experience
-        # This is inefficient but works with Grain's multi-worker setup
-        with open(self.storage_path, "r") as f:
-            data = json.load(f)
-            experiences = data["experiences"]
-            return _deserialize_experience(experiences[int(index)])
+        return self.experiences[int(index)]
 
 
 class GrainReplayBuffer:
@@ -172,8 +168,8 @@ class GrainReplayBuffer:
         with open(self.storage_path, "w") as f:
             json.dump({"experiences": stored_exps}, f)
         
-        # Update data source length
-        self._data_source._length = len(stored_exps)
+        # Update data source with deserialized experiences
+        self._data_source.experiences = [_deserialize_experience(exp) for exp in stored_exps]
 
     def _create_dataloader(self, batch_size: int, shuffle: bool = True) -> DataLoader | None:
         """Create Grain DataLoader with IndexSampler and multiple workers."""
