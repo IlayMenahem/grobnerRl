@@ -1,0 +1,235 @@
+"""
+AlphaZero training script entry point.
+
+This script orchestrates AlphaZero training using consolidated components
+from grobnerRl.models, grobnerRl.training.shared, and grobnerRl.training.alphaZero.
+"""
+
+import os
+
+import equinox as eqx
+import jax
+import optax
+
+from grobnerRl.envs.env import BuchbergerEnv
+from grobnerRl.envs.ideals import SAT3IdealGenerator
+from grobnerRl.models import GrobnerPolicyValue, ModelConfig
+from grobnerRl.training.alphaZero import (
+    AlphaZeroConfig,
+    generate_self_play_data,
+)
+from grobnerRl.training.shared import (
+    GrainReplayBuffer,
+    TrainConfig,
+    evaluate_model,
+    train_policy_value,
+)
+from grobnerRl.training.utils import (
+    create_metrics_log_path,
+    log_metrics,
+    save_checkpoint,
+)
+
+if __name__ == "__main__":
+    num_vars = 5
+    multiple = 4.55
+    num_clauses = int(num_vars * multiple)
+
+    pretrained_checkpoint_path: str | None = (
+        None  # os.path.join("models", "checkpoints", "best.eqx")
+    )
+
+    monomials_dim = num_vars + 1
+    monoms_embedding_dim = 64
+    polys_embedding_dim = 128
+    ideal_depth = 2
+    ideal_num_heads = 2
+    value_hidden_dim = 128
+
+    model_config = ModelConfig(
+        monomials_dim=monomials_dim,
+        monoms_embedding_dim=monoms_embedding_dim,
+        polys_embedding_dim=polys_embedding_dim,
+        ideal_depth=ideal_depth,
+        ideal_num_heads=ideal_num_heads,
+        value_hidden_dim=value_hidden_dim,
+    )
+
+    alphazero_config = AlphaZeroConfig(
+        num_simulations=50,
+        c_puct=1.25,
+        dirichlet_alpha=0.3,
+        dirichlet_epsilon=0.25,
+        gamma=0.99,
+    )
+
+    train_config = TrainConfig(
+        learning_rate=1e-4,
+        batch_size=128,
+        num_epochs_per_iteration=1,
+        policy_loss_weight=10.0,
+        value_loss_weight=1.0,
+        worker_count=1,
+        worker_buffer_size=4,
+    )
+
+    num_iterations = 500
+    episodes_per_iteration = 1
+    replay_buffer_size = 2**12
+    checkpoint_dir = os.path.join("models", "alphazero_checkpoints")
+    logs_dir = "logs"
+    eval_interval = 10
+    eval_episodes = 25
+
+    key = jax.random.key(42)
+
+    ideal_gen = SAT3IdealGenerator(num_vars, num_clauses)
+    env = BuchbergerEnv(ideal_gen, mode="train")
+
+    optimizer = optax.nadam(train_config.learning_rate)
+
+    if pretrained_checkpoint_path and os.path.exists(pretrained_checkpoint_path):
+        print(f"Loading pretrained model from {pretrained_checkpoint_path}")
+        key, k_model = jax.random.split(key)
+        model = GrobnerPolicyValue.from_pretrained(
+            checkpoint_path=pretrained_checkpoint_path,
+            config=model_config,
+            optimizer=optimizer,
+            key=k_model,
+        )
+        print("Pretrained model loaded.")
+    else:
+        print("Initializing model from scratch")
+        key, k_model = jax.random.split(key)
+        model = GrobnerPolicyValue.from_scratch(config=model_config, key=k_model)
+
+    replay_buffer = GrainReplayBuffer(
+        max_size=replay_buffer_size,
+        storage_dir="replay_buffer_alphazero",
+        worker_count=train_config.worker_count,
+        worker_buffer_size=train_config.worker_buffer_size,
+    )
+
+    print("\nStarting AlphaZero training...")
+    print(f"  Iterations: {num_iterations}")
+    print(f"  Episodes per iteration: {episodes_per_iteration}")
+    print(f"  Simulations: {alphazero_config.num_simulations}")
+    print(f"  c_puct: {alphazero_config.c_puct}")
+    print(f"  Dirichlet alpha: {alphazero_config.dirichlet_alpha}")
+    print(f"  Dirichlet epsilon: {alphazero_config.dirichlet_epsilon}")
+    print(f"  Replay buffer size: {replay_buffer_size}")
+    print(f"  Checkpoint directory: {checkpoint_dir}")
+
+    hyperparameters = {
+        "num_vars": num_vars,
+        "multiple": multiple,
+        "num_clauses": num_clauses,
+        "model_config": {
+            "monomials_dim": model_config.monomials_dim,
+            "monoms_embedding_dim": model_config.monoms_embedding_dim,
+            "polys_embedding_dim": model_config.polys_embedding_dim,
+            "ideal_depth": model_config.ideal_depth,
+            "ideal_num_heads": model_config.ideal_num_heads,
+            "value_hidden_dim": model_config.value_hidden_dim,
+        },
+        "alphazero_config": {
+            "num_simulations": alphazero_config.num_simulations,
+            "c_puct": alphazero_config.c_puct,
+            "dirichlet_alpha": alphazero_config.dirichlet_alpha,
+            "dirichlet_epsilon": alphazero_config.dirichlet_epsilon,
+            "gamma": alphazero_config.gamma,
+        },
+        "train_config": {
+            "learning_rate": train_config.learning_rate,
+            "batch_size": train_config.batch_size,
+            "num_epochs_per_iteration": train_config.num_epochs_per_iteration,
+            "policy_loss_weight": train_config.policy_loss_weight,
+            "value_loss_weight": train_config.value_loss_weight,
+            "worker_count": train_config.worker_count,
+            "worker_buffer_size": train_config.worker_buffer_size,
+        },
+        "num_iterations": num_iterations,
+        "episodes_per_iteration": episodes_per_iteration,
+        "replay_buffer_size": replay_buffer_size,
+        "eval_interval": eval_interval,
+        "eval_episodes": eval_episodes,
+        "pretrained_checkpoint": pretrained_checkpoint_path,
+        "optimizer": "nadam",
+    }
+
+    metrics_log_path = create_metrics_log_path(logs_dir, hyperparameters)
+    print(f"  Metrics log file: {metrics_log_path}")
+
+    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+    best_reward = float("-inf")
+
+    for iteration in range(num_iterations):
+        print(f"\n{'=' * 60}")
+        print(f"Iteration {iteration + 1}/{num_iterations}")
+        print(f"{'=' * 60}")
+
+        print("\nGenerating self-play data...")
+        key, subkey = jax.random.split(key)
+        experiences = generate_self_play_data(
+            model, env, episodes_per_iteration, alphazero_config, subkey
+        )
+        print(f"Generated {len(experiences)} experiences")
+
+        replay_buffer.add(experiences)
+        print(f"Replay buffer size: {len(replay_buffer)}")
+
+        iteration_metrics = {
+            "num_experiences": len(experiences),
+            "replay_buffer_size": len(replay_buffer),
+        }
+
+        metrics: dict = {}
+        if len(replay_buffer) >= train_config.batch_size:
+            print("\nTraining...")
+            model, opt_state, metrics = train_policy_value(
+                model, replay_buffer, train_config, optimizer, opt_state
+            )
+            print(
+                f"  Policy loss: {metrics['policy_loss']:.4f}, "
+                f"Value loss: {metrics['value_loss']:.4f}, "
+                f"Total loss: {metrics['total_loss']:.4f}"
+            )
+
+            iteration_metrics.update(metrics)
+
+            if checkpoint_dir:
+                save_checkpoint(
+                    model, opt_state, checkpoint_dir, "last", iteration + 1, metrics
+                )
+
+        if (iteration + 1) % eval_interval == 0:
+            print("\nEvaluating...")
+            eval_metrics = evaluate_model(model, env, eval_episodes)
+            print(
+                f"  Mean reward: {eval_metrics['mean_reward']:.2f} +/- {eval_metrics['std_reward']:.2f}, "
+                f"Mean length: {eval_metrics['mean_length']:.1f}"
+            )
+
+            iteration_metrics.update(eval_metrics)
+
+            if eval_metrics["mean_reward"] > best_reward:
+                best_reward = eval_metrics["mean_reward"]
+                iteration_metrics["is_best"] = True
+                if checkpoint_dir:
+                    combined_metrics = {**metrics, **eval_metrics}
+                    save_checkpoint(
+                        model,
+                        opt_state,
+                        checkpoint_dir,
+                        "best_alphazero",
+                        iteration + 1,
+                        combined_metrics,
+                    )
+                    print(f"  Saved new best model (reward: {best_reward:.2f})")
+            else:
+                iteration_metrics["is_best"] = False
+
+        log_metrics(iteration_metrics, metrics_log_path, iteration + 1)
+
+    print(f"\nTraining complete. Best reward: {best_reward:.2f}")
+    print("\nDone!")
