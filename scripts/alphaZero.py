@@ -67,7 +67,7 @@ if __name__ == "__main__":
         learning_rate=1e-4,
         batch_size=128,
         num_epochs_per_iteration=1,
-        policy_loss_weight=10.0,
+        policy_loss_weight=3.0,
         value_loss_weight=1.0,
         worker_count=1,
         worker_buffer_size=4,

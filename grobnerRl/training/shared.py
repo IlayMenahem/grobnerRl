@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 from collections.abc import Sequence
+from copy import copy
 from dataclasses import dataclass
 from typing import Iterator
 
@@ -20,6 +21,43 @@ from jaxtyping import Array
 
 from grobnerRl.envs.env import BuchbergerEnv, make_obs
 from grobnerRl.models import GrobnerPolicyValue
+
+
+class MinMaxStats:
+    """
+    Tracks min/max values across a search tree for normalisation.
+
+    Values are normalised to [0, 1] using the global min/max seen during
+    tree search, ensuring that exploration bonuses operate on a consistent
+    scale regardless of the environment's reward magnitude.
+    """
+
+    def __init__(self) -> None:
+        self.maximum: float = -float("inf")
+        self.minimum: float = float("inf")
+
+    def update(self, value: float) -> None:
+        self.maximum = max(self.maximum, value)
+        self.minimum = min(self.minimum, value)
+
+    def normalize(self, value: float) -> float:
+        if self.maximum > self.minimum:
+            return (value - self.minimum) / (self.maximum - self.minimum)
+        return value
+
+
+def copy_env(env: BuchbergerEnv) -> BuchbergerEnv:
+    """Create a shallow copy of the environment with independent generator and pair lists."""
+    new_env = copy(env)
+    new_env.generators = list(env.generators)
+    new_env.pairs = list(env.pairs)
+    return new_env
+
+
+def get_valid_actions(env: BuchbergerEnv) -> list[int]:
+    """Return valid actions as flattened pair indices for the current environment state."""
+    num_polys = len(env.generators)
+    return [i * num_polys + j for i, j in env.pairs]
 
 
 @dataclass

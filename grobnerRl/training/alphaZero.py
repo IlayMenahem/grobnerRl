@@ -16,7 +16,6 @@ References:
        Learning Algorithm" (Silver et al., 2017)
 """
 
-from copy import copy
 from dataclasses import dataclass, field
 
 import jax
@@ -25,8 +24,12 @@ from jaxtyping import PRNGKeyArray
 
 from grobnerRl.envs.env import BuchbergerEnv, make_obs
 from grobnerRl.models import GrobnerPolicyValue
-from grobnerRl.training.gumbelMuZero import MinMaxStats
-from grobnerRl.training.shared import Experience
+from grobnerRl.training.shared import (
+    Experience,
+    MinMaxStats,
+    copy_env,
+    get_valid_actions,
+)
 
 
 @dataclass
@@ -88,20 +91,6 @@ class AlphaZeroNode:
         return self.env is not None
 
 
-def _copy_env(env: BuchbergerEnv) -> BuchbergerEnv:
-    """Create a shallow copy of the environment with independent generator and pair lists."""
-    new_env = copy(env)
-    new_env.generators = list(env.generators)
-    new_env.pairs = list(env.pairs)
-    return new_env
-
-
-def _get_valid_actions(env: BuchbergerEnv) -> list[int]:
-    """Return valid actions as flattened pair indices for the current environment state."""
-    num_polys = len(env.generators)
-    return [i * num_polys + j for i, j in env.pairs]
-
-
 def _expand_node(
     node: AlphaZeroNode,
     model: GrobnerPolicyValue,
@@ -136,7 +125,7 @@ def _expand_node(
     node.policy_logits = np.array(policy_logits)
     node.network_value = float(value)
     node.num_polys = len(node.env.generators)
-    node.valid_actions = _get_valid_actions(node.env)
+    node.valid_actions = get_valid_actions(node.env)
 
     if not node.valid_actions:
         return
@@ -267,7 +256,7 @@ def _run_simulation(
 
         if not child.expanded:
             # Step the real environment and expand the leaf
-            child.env = _copy_env(node.env)
+            child.env = copy_env(node.env)
             i, j = action // node.num_polys, action % node.num_polys
             _, reward, terminated, _, _ = child.env.step((i, j))
             child.reward = float(reward)
@@ -360,7 +349,7 @@ class AlphaZeroSearch:
         """
         num_polys = len(env.generators)
 
-        root = AlphaZeroNode(env=_copy_env(env))
+        root = AlphaZeroNode(env=copy_env(env))
         root.num_polys = num_polys
         _expand_node(
             root,
@@ -439,7 +428,7 @@ def run_self_play_episode(
         if total > 0:
             action_probs = policy_target / total
         else:
-            valid_actions = _get_valid_actions(env)
+            valid_actions = get_valid_actions(env)
             action_probs = np.zeros_like(policy_target)
             for a in valid_actions:
                 action_probs[a] = 1.0 / len(valid_actions)

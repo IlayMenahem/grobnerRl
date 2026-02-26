@@ -20,7 +20,6 @@ References:
     - "Policy improvement by planning with Gumbel" (Danihelka et al., 2022)
 """
 
-from copy import copy
 from dataclasses import dataclass, field
 from typing import Literal, overload
 
@@ -31,7 +30,12 @@ from jaxtyping import Array, PRNGKeyArray
 
 from grobnerRl.envs.env import BuchbergerEnv, make_obs
 from grobnerRl.models import GrobnerPolicyValue
-from grobnerRl.training.shared import Experience
+from grobnerRl.training.shared import (
+    Experience,
+    MinMaxStats,
+    copy_env,
+    get_valid_actions,
+)
 
 
 @dataclass
@@ -43,30 +47,6 @@ class GumbelMuZeroConfig:
     gamma: float = 0.99
     c_visit: float = 50.0
     c_scale: float = 1.0
-
-
-class MinMaxStats:
-    """
-    Tracks min/max Q-values across the entire search tree for normalization.
-
-    Q-values are normalized to [0, 1] using the global min/max found during
-    tree search, as described in the MuZero paper. This ensures the sigma
-    transformation operates on a consistent scale regardless of the
-    environment's reward magnitude.
-    """
-
-    def __init__(self):
-        self.maximum = -float("inf")
-        self.minimum = float("inf")
-
-    def update(self, value: float):
-        self.maximum = max(self.maximum, value)
-        self.minimum = min(self.minimum, value)
-
-    def normalize(self, value: float) -> float:
-        if self.maximum > self.minimum:
-            return (value - self.minimum) / (self.maximum - self.minimum)
-        return value
 
 
 @dataclass
@@ -186,20 +166,6 @@ def gumbel_top_k(
     gumbel_values = gumbel_noise[top_k_indices]
 
     return selected_actions, gumbel_values
-
-
-def copy_env(env: BuchbergerEnv) -> BuchbergerEnv:
-    """Create a copy of the environment state."""
-    new_env = copy(env)
-    new_env.generators = list(env.generators)
-    new_env.pairs = list(env.pairs)
-    return new_env
-
-
-def get_valid_actions(env: BuchbergerEnv) -> list[int]:
-    """Get list of valid actions as flattened pair indices."""
-    num_polys = len(env.generators)
-    return [i * num_polys + j for i, j in env.pairs]
 
 
 def expand_node(node: GumbelNode, model: GrobnerPolicyValue) -> None:
