@@ -107,7 +107,7 @@ if __name__ == "__main__":
 
     replay_buffer = GrainReplayBuffer(
         max_size=replay_buffer_size,
-        storage_dir="replay_buffer",
+        storage_dir=os.path.join("replay_buffer", "gumbel_muzero"),
         worker_count=train_config.worker_count,
         worker_buffer_size=train_config.worker_buffer_size,
     )

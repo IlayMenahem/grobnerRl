@@ -139,7 +139,12 @@ class ExperienceDataSource(grain.RandomAccessDataSource):
 
 
 class GrainReplayBuffer:
-    """Grain-based replay buffer using file storage and IndexSampler."""
+    """
+    Grain-based replay buffer using file-backed circular storage.
+
+    FIFO eviction is driven purely by the on-disk count so that position and
+    fullness state survive process restarts without any extra bookkeeping file.
+    """
 
     def __init__(
         self,
@@ -152,16 +157,15 @@ class GrainReplayBuffer:
         Initialize replay buffer with file-based storage.
 
         Args:
-            max_size: Maximum number of experiences to store
-            storage_dir: Directory to store experience files (uses temp dir if None)
-            worker_count: Number of workers for data loading
-            worker_buffer_size: Buffer size per worker
+            max_size: Maximum number of experiences to store.
+            storage_dir: Directory to store experience files (uses temp dir if None).
+            worker_count: Number of workers for data loading.
+            worker_buffer_size: Buffer size per worker.
         """
         self.max_size = max_size
         self.worker_count = worker_count
         self.worker_buffer_size = worker_buffer_size
 
-        # Setup storage
         if storage_dir is None:
             self._temp_dir = tempfile.mkdtemp(prefix="grain_replay_")
             self.storage_dir = self._temp_dir
@@ -172,37 +176,36 @@ class GrainReplayBuffer:
 
         self.storage_path = os.path.join(self.storage_dir, "experiences.json")
 
-        # Initialize with empty file
         if not os.path.exists(self.storage_path):
             with open(self.storage_path, "w") as f:
                 json.dump({"experiences": []}, f)
 
         self._data_source = ExperienceDataSource(self.storage_path)
         self._current_epoch = 0
-        self._experiences_buffer: list[dict] = []
 
-        # Track FIFO position for circular buffer
-        self._position = 0
-        self._is_full = False
+        # Derive circular-buffer state from the existing on-disk count so that
+        # resuming a run never appends past max_size.
+        existing_count = len(self._data_source)
+        self._is_full: bool = existing_count >= self.max_size
+        self._position: int = (
+            existing_count % self.max_size if self._is_full else existing_count
+        )
 
     def add(self, experiences: list[Experience]) -> None:
-        """Add experiences to buffer with FIFO eviction when full."""
-        # Load existing experiences
+        """Add experiences to the buffer with FIFO eviction once full."""
         with open(self.storage_path, "r") as f:
-            data = json.load(f)
-            stored_exps = data["experiences"]
+            stored_exps: list[dict] = json.load(f)["experiences"]
 
-        # Add new experiences with FIFO eviction
         for exp in experiences:
             serialized = _serialize_experience(exp)
-
-            if not self._is_full and len(stored_exps) < self.max_size:
-                stored_exps.append(serialized)
-            else:
-                # FIFO: replace oldest experience
-                self._is_full = True
+            if self._is_full:
                 stored_exps[self._position] = serialized
-                self._position = (self._position + 1) % self.max_size
+            else:
+                stored_exps.append(serialized)
+                if len(stored_exps) >= self.max_size:
+                    self._is_full = True
+
+            self._position = (self._position + 1) % self.max_size
 
         # Write back to file
         with open(self.storage_path, "w") as f:

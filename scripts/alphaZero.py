@@ -75,7 +75,7 @@ if __name__ == "__main__":
 
     num_iterations = 500
     episodes_per_iteration = 1
-    replay_buffer_size = 2**12
+    replay_buffer_size = 2**10
     checkpoint_dir = os.path.join("models", "alphazero_checkpoints")
     logs_dir = "logs"
     eval_interval = 10
@@ -105,7 +105,7 @@ if __name__ == "__main__":
 
     replay_buffer = GrainReplayBuffer(
         max_size=replay_buffer_size,
-        storage_dir="replay_buffer_alphazero",
+        storage_dir=os.path.join("replay_buffer", "alphazero"),
         worker_count=train_config.worker_count,
         worker_buffer_size=train_config.worker_buffer_size,
     )
