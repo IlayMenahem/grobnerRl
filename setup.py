@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+from setuptools import find_packages, setup
 
 setup(
     name="grobnerRl",
@@ -11,14 +11,15 @@ setup(
     url="https://github.com/ilaymenahem/grobnerRl",
     packages=find_packages(),
     install_requires=[
-        'gymnasium',
-        'tqdm',
-        'numpy',
-        'matplotlib',
-        'sympy',
-        'torch',
-        'grain-python',
-        'implementations @ git+https://github.com/IlayMenahem/implementations',
+        "gymnasium",
+        "tqdm",
+        "numpy",
+        "matplotlib",
+        "sympy",
+        "jax",
+        "equinox",
+        "optax",
+        "grain",
     ],
     classifiers=[
         "Programming Language :: Python :: 3",

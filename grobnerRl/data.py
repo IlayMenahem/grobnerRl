@@ -6,9 +6,7 @@ from itertools import accumulate
 from typing import SupportsIndex, Union
 
 import numpy as np
-import torch
 from grain.sources import RandomAccessDataSource
-from torch.utils.data import Dataset
 from tqdm import tqdm
 
 from grobnerRl.envs.env import BaseEnv, BuchbergerEnv, tokenize
@@ -30,74 +28,27 @@ class JsonDatasource(RandomAccessDataSource[Union[tuple[Observation, Action], tu
 
         self.states = dataset[obs]
         self.labels = labels
-        
+
         # Load all label arrays
         self.label_data = [dataset[label] for label in self.labels]
 
         if indices is not None:
             self.states = [self.states[int(i)] for i in indices]
-            self.label_data = [[label_array[int(i)] for i in indices] for label_array in self.label_data]
+            self.label_data = [
+                [label_array[int(i)] for i in indices]
+                for label_array in self.label_data
+            ]
 
     def __len__(self):
         return len(self.states)
 
-    def __getitem__(self, idx: SupportsIndex) -> Union[tuple[Observation, Action], tuple]:
+    def __getitem__(
+        self, idx: SupportsIndex
+    ) -> Union[tuple[Observation, Action], tuple]:
         state = self.states[idx]
         label_values = [label_data[idx] for label_data in self.label_data]
-        
+
         return (state, *label_values)
-
-
-class JsonDataset(Dataset):
-    def __init__(self, path: str, obs: str, labels: str):
-        with open(path, "r") as f:
-            dataset = json.load(f)
-
-        self.states = dataset[obs]
-        self.actions = dataset[labels]
-
-    def __len__(self):
-        return len(self.states)
-
-    def __getitem__(self, idx):
-        state = self.states[idx]
-        action = self.actions[idx]
-
-        return state, action
-
-
-def collate(batch):
-    """
-    Collate function that creates nested tensors for variable-length polynomial ideals.
-
-    Each state is a tuple (ideal, selectables) where:
-    - ideal: list of polynomials (each polynomial is a numpy array of monomials)
-    - selectables: list of tuples indicating valid actions
-
-    Returns:
-    - nested_batch: List of nested tensors (one per batch item), representing the batch
-    - selectables_batch: List of selectables for each batch item
-    - actions_tensor: Tensor of actions
-    """
-    states, actions = map(list, zip(*batch))
-
-    nested_batch = []
-    selectables_batch = []
-
-    for state in states:
-        ideal, pairs = state
-
-        pairs = [tuple(pair) for pair in pairs]
-
-        poly_tensors = [torch.from_numpy(np.array(poly)).float() for poly in ideal]
-        nested_ideal = torch.nested.nested_tensor(poly_tensors, layout=torch.jagged)
-
-        nested_batch.append(nested_ideal)
-        selectables_batch.append(pairs)
-
-    actions_tensor = torch.tensor(actions, dtype=torch.long)
-
-    return (nested_batch, selectables_batch), actions_tensor
 
 
 def generate_expert_data(env: BaseEnv, size, path, expert_agent: Expert, gamma=0.99):
@@ -306,7 +257,7 @@ if __name__ == "__main__":
     datasource = JsonDatasource(data_path, "states", "actions")
     sampler = IndexSampler(len(datasource), ShardOptions(0, 1, True), True, seed=0)
     dataloader = DataLoader(
-        data_source=datasource, sampler=sampler, operations=(to_batch,), worker_count=0
+        data_source=datasource, sampler=sampler, operations=(to_batch,), worker_count=2
     )
 
     num_vars = 4
