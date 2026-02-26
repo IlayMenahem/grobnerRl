@@ -261,9 +261,7 @@ def compute_v_mix(node: GumbelNode) -> float:
         The v_mix value estimate.
     """
     total_visits = sum(
-        node.children[a].visit_count
-        for a in node.valid_actions
-        if a in node.children
+        node.children[a].visit_count for a in node.valid_actions if a in node.children
     )
 
     if total_visits == 0:
@@ -282,8 +280,7 @@ def compute_v_mix(node: GumbelNode) -> float:
 
     if visited_prior_sum > 0:
         v_mix = (
-            node.network_value
-            + (total_visits / visited_prior_sum) * weighted_q_sum
+            node.network_value + (total_visits / visited_prior_sum) * weighted_q_sum
         ) / (1 + total_visits)
     else:
         v_mix = node.network_value
@@ -333,18 +330,19 @@ def select_non_root_action(
     normalized_q = {a: min_max_stats.normalize(q) for a, q in completed_q.items()}
 
     # Compute sigma transformation
-    visit_counts = np.array([
-        node.children[a].visit_count if a in node.children else 0
-        for a in node.valid_actions
-    ])
+    visit_counts = np.array(
+        [
+            node.children[a].visit_count if a in node.children else 0
+            for a in node.valid_actions
+        ]
+    )
     max_visit = visit_counts.max() if len(visit_counts) > 0 else 0
     scale = (config.c_visit + max_visit) * config.c_scale
 
     # Compute improved policy π' = softmax(logits + σ(normalized_completedQ))
-    improved_logits = np.array([
-        node.policy_logits[a] + scale * normalized_q[a]
-        for a in node.valid_actions
-    ])
+    improved_logits = np.array(
+        [node.policy_logits[a] + scale * normalized_q[a] for a in node.valid_actions]
+    )
     max_l = improved_logits.max()
     exp_l = np.exp(improved_logits - max_l)
     pi_prime = exp_l / exp_l.sum()
@@ -534,22 +532,24 @@ def sequential_halving(
                 break
 
         # Score remaining actions: g(a) + logits(a) + σ(q̂(a))
-        q_values = np.array([
-            root.children[int(a)].q_value if int(a) in root.children else 0.0
-            for a in remaining_actions
-        ])
-        visit_counts = np.array([
-            root.children[int(a)].visit_count if int(a) in root.children else 0
-            for a in remaining_actions
-        ])
+        q_values = np.array(
+            [
+                root.children[int(a)].q_value if int(a) in root.children else 0.0
+                for a in remaining_actions
+            ]
+        )
+        visit_counts = np.array(
+            [
+                root.children[int(a)].visit_count if int(a) in root.children else 0
+                for a in remaining_actions
+            ]
+        )
 
         # Normalize Q-values using tree-wide min-max stats
         normalized_q = np.array([min_max_stats.normalize(q) for q in q_values])
 
         action_logits = policy_logits[remaining_actions]
-        sigma_values = sigma(
-            normalized_q, visit_counts, config.c_visit, config.c_scale
-        )
+        sigma_values = sigma(normalized_q, visit_counts, config.c_visit, config.c_scale)
         scores = remaining_gumbels + action_logits + sigma_values
 
         # Keep top half
@@ -566,19 +566,21 @@ def sequential_halving(
         return int(remaining_actions[0])
 
     # Select action with highest g(a) + logits(a) + σ(q̂(a))
-    q_values = np.array([
-        root.children[int(a)].q_value if int(a) in root.children else 0.0
-        for a in remaining_actions
-    ])
-    visit_counts = np.array([
-        root.children[int(a)].visit_count if int(a) in root.children else 0
-        for a in remaining_actions
-    ])
+    q_values = np.array(
+        [
+            root.children[int(a)].q_value if int(a) in root.children else 0.0
+            for a in remaining_actions
+        ]
+    )
+    visit_counts = np.array(
+        [
+            root.children[int(a)].visit_count if int(a) in root.children else 0
+            for a in remaining_actions
+        ]
+    )
     normalized_q = np.array([min_max_stats.normalize(q) for q in q_values])
     action_logits = policy_logits[remaining_actions]
-    sigma_values = sigma(
-        normalized_q, visit_counts, config.c_visit, config.c_scale
-    )
+    sigma_values = sigma(normalized_q, visit_counts, config.c_visit, config.c_scale)
     scores = remaining_gumbels + action_logits + sigma_values
     best_idx = np.argmax(scores)
     return int(remaining_actions[best_idx])
@@ -620,8 +622,7 @@ class GumbelMuZeroSearch:
         env: BuchbergerEnv,
         key: PRNGKeyArray,
         return_selected_action: Literal[False] = False,
-    ) -> tuple[np.ndarray, float]:
-        ...
+    ) -> tuple[np.ndarray, float]: ...
 
     @overload
     def search(
@@ -629,8 +630,7 @@ class GumbelMuZeroSearch:
         env: BuchbergerEnv,
         key: PRNGKeyArray,
         return_selected_action: Literal[True],
-    ) -> tuple[np.ndarray, float, int | None]:
-        ...
+    ) -> tuple[np.ndarray, float, int | None]: ...
 
     def search(
         self,
@@ -719,7 +719,10 @@ class GumbelMuZeroSearch:
             visit_counts[action] = child.visit_count
 
         sigma_values = sigma(
-            normalized_completed_q, visit_counts, self.config.c_visit, self.config.c_scale
+            normalized_completed_q,
+            visit_counts,
+            self.config.c_visit,
+            self.config.c_scale,
         )
 
         # Improved policy: π' = softmax(logits + σ(completedQ))
@@ -783,8 +786,13 @@ def run_self_play_episode(
         # Create uncompressed experience directly
         ideal, selectables = current_obs
         exp = Experience(
-            ideal=tuple(poly.astype(np.float32) if poly.dtype != np.float32 else poly for poly in ideal),
-            selectables=tuple(tuple(pair) for pair in selectables) if isinstance(selectables, list) else selectables,
+            ideal=tuple(
+                poly.astype(np.float32) if poly.dtype != np.float32 else poly
+                for poly in ideal
+            ),
+            selectables=tuple(tuple(pair) for pair in selectables)
+            if isinstance(selectables, list)
+            else selectables,
             policy=policy.astype(np.float32),
             value=0.0,
             num_polys=num_polys,

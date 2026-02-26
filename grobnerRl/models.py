@@ -74,7 +74,7 @@ class PolynomialEmbedder(Module):
         h = polynomial
         for layer in self.phi_layers:
             h = jax.nn.relu(jax.vmap(layer)(h))
-        
+
         lm_emb = h[0]
         if mask is not None:
             h = jnp.where(mask[:, None], h, -jnp.inf)
@@ -82,7 +82,7 @@ class PolynomialEmbedder(Module):
         h_pooled = jnp.max(h, axis=0)
         h_pooled = jnp.where(jnp.isneginf(h_pooled), 0.0, h_pooled)
         x = lm_emb + h_pooled
-        
+
         for layer in self.rho_layers:
             x = jax.nn.relu(layer(x))
 
@@ -238,7 +238,7 @@ class Extractor(Module):
             masks_stacked = obs["monomial_masks"]
             poly_mask = obs["poly_masks"]
             selectables_mask = obs["selectables"]
-            
+
             monomial_embs = jax.vmap(self.monomial_embedder)(ideal_stacked)
             ideal_embeddings = jax.vmap(self.polynomial_embedder)(
                 monomial_embs, masks_stacked
@@ -247,7 +247,7 @@ class Extractor(Module):
             ideal_embeddings = self.ideal_model(ideal_embeddings, mask=poly_mask)
 
             values = self.pairwise_scorer(ideal_embeddings)
-            
+
             # Apply selectables mask
             values = values + selectables_mask
             return values.flatten()
@@ -284,7 +284,7 @@ class Extractor(Module):
         )
 
         poly_mask = jnp.ones(ideal_embeddings.shape[0], dtype=bool)
-        
+
         ideal_embeddings = self.ideal_model(ideal_embeddings, mask=poly_mask)
 
         values = self.pairwise_scorer(ideal_embeddings)
@@ -363,7 +363,12 @@ class GrobnerPolicyValue(Module):
 
     The model uses a shared backbone (Extractor) for feature extraction
     and separate heads for policy logits and value estimation.
-    Used by both AlphaZero and Gumbel MuZero algorithms.
+    Used by AlphaZero, Gumbel MuZero, and Rainbow DQN.
+
+    For DQN the two outputs map directly onto the dueling architecture:
+      - policy logits  →  advantage stream  A(s, a)
+      - value estimate →  state-value stream V(s)
+    Combined via q_values() into Q(s, a) = V(s) + A(s, a) - mean_a'[A(s, a')].
     """
 
     extractor: Extractor
@@ -441,6 +446,26 @@ class GrobnerPolicyValue(Module):
         value = -jax.nn.softplus(self.value_head(pooled).squeeze(-1))
 
         return policy_logits, value
+
+    def q_values(self, obs: "Observation | dict | tuple") -> Array:
+        """
+        Dueling Q-values for a single observation.
+
+        Combines the advantage stream (policy logits) and the state-value
+        estimate into per-action Q-values:
+            Q(s, a) = V(s) + A(s, a) - mean_a'[A(s, a')]
+
+        Args:
+            obs: Environment observation (tuple or dict format).
+
+        Returns:
+            Array of Q-values with the same shape as the policy logits.
+        """
+        advantages, value = self(obs)
+        valid_mask = jnp.isfinite(advantages)
+        valid_advantages = jnp.where(valid_mask, advantages, 0.0)
+        mean_advantage = valid_advantages.sum() / (valid_mask.sum() + 1e-9)
+        return value + (advantages - mean_advantage)
 
     @classmethod
     def from_scratch(cls, config: ModelConfig, key: Array) -> "GrobnerPolicyValue":

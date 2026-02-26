@@ -24,14 +24,20 @@ from grobnerRl.training.shared import (
     evaluate_model,
     train_policy_value,
 )
-from grobnerRl.training.utils import create_metrics_log_path, log_metrics, save_checkpoint
+from grobnerRl.training.utils import (
+    create_metrics_log_path,
+    log_metrics,
+    save_checkpoint,
+)
 
 if __name__ == "__main__":
     num_vars = 5
     multiple = 4.55
     num_clauses = int(num_vars * multiple)
 
-    pretrained_checkpoint_path: str | None = None # os.path.join("models", "checkpoints", "best.eqx")
+    pretrained_checkpoint_path: str | None = (
+        None  # os.path.join("models", "checkpoints", "best.eqx")
+    )
 
     monomials_dim = num_vars + 1
     monoms_embedding_dim = 64
@@ -58,10 +64,10 @@ if __name__ == "__main__":
     )
 
     train_config = TrainConfig(
-        learning_rate=5e-4,
+        learning_rate=1e-4,
         batch_size=64,
         num_epochs_per_iteration=1,
-        policy_loss_weight=1.0,
+        policy_loss_weight=10.0,
         value_loss_weight=1.0,
         worker_count=1,
         worker_buffer_size=4,
@@ -77,7 +83,9 @@ if __name__ == "__main__":
 
     key = jax.random.key(42)
 
-    ideal_gen = SAT3IdealGenerator(num_vars, num_clauses)
+    ideal_gen = SAT3IdealGenerator(
+        num_vars, num_clauses
+    )  # parse_ideal_dist("3-20-5-uniform")
     env = BuchbergerEnv(ideal_gen, mode="train")
 
     optimizer = optax.nadam(train_config.learning_rate)
@@ -156,9 +164,9 @@ if __name__ == "__main__":
     best_reward = float("-inf")
 
     for iteration in range(num_iterations):
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Iteration {iteration + 1}/{num_iterations}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         print("\nGenerating self-play data...")
         key, subkey = jax.random.split(key)
@@ -201,7 +209,7 @@ if __name__ == "__main__":
                 f"  Mean reward: {eval_metrics['mean_reward']:.2f} +/- {eval_metrics['std_reward']:.2f}, "
                 f"Mean length: {eval_metrics['mean_length']:.1f}"
             )
-            
+
             iteration_metrics.update(eval_metrics)
 
             if eval_metrics["mean_reward"] > best_reward:
@@ -210,7 +218,12 @@ if __name__ == "__main__":
                 if checkpoint_dir:
                     combined_metrics = {**metrics, **eval_metrics}
                     save_checkpoint(
-                        model, opt_state, checkpoint_dir, "best_gumbel_muzero", iteration + 1, combined_metrics
+                        model,
+                        opt_state,
+                        checkpoint_dir,
+                        "best_gumbel_muzero",
+                        iteration + 1,
+                        combined_metrics,
                     )
                     print(f"  Saved new best model (reward: {best_reward:.2f})")
             else:
