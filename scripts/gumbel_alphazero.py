@@ -1,11 +1,24 @@
 """Run Gumbel AlphaZero training on the Buchberger environment."""
 
 import argparse
+import os
+
+os.environ.setdefault(
+    "JAX_COMPILATION_CACHE_DIR", os.path.expanduser("~/.cache/jax")
+)
+os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "0")
+os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES", "0")
 
 import equinox as eqx
 import jax
 import numpy as np
 import optax
+
+jax.config.update(
+    "jax_compilation_cache_dir", os.environ["JAX_COMPILATION_CACHE_DIR"]
+)
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
 
 from grobnerRl.env import BuchbergerEnv
 from grobnerRl.ideals import RandomBinomialIdealGenerator

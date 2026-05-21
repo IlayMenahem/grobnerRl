@@ -2,7 +2,6 @@
 
 import json
 import os
-import tempfile
 from copy import copy
 from dataclasses import dataclass
 from typing import Iterator
@@ -106,13 +105,17 @@ def _deserialize_experience(data: dict) -> Experience:
 
 
 class ExperienceDataSource(grain.RandomAccessDataSource):
-    """Grain data source for experiences stored in a JSON file."""
+    """Grain data source backed by an in-memory list of experiences.
 
-    def __init__(self, storage_path: str):
+    Loads from a JSON file on construction if `storage_path` is provided and
+    the file exists; otherwise starts empty.
+    """
+
+    def __init__(self, storage_path: str | None = None):
         self.storage_path = storage_path
         self.experiences: list[Experience] = []
 
-        if os.path.exists(storage_path):
+        if storage_path is not None and os.path.exists(storage_path):
             with open(storage_path, "r") as f:
                 data = json.load(f)
                 self.experiences = [
@@ -130,10 +133,11 @@ class ExperienceDataSource(grain.RandomAccessDataSource):
 
 class GrainReplayBuffer:
     """
-    Grain-based replay buffer using file-backed circular storage.
+    Grain-backed replay buffer with an in-memory FIFO circular store.
 
-    FIFO eviction is driven purely by the on-disk count so that position and
-    fullness state survive process restarts without any extra bookkeeping file.
+    Persistence is opt-in: pass an explicit `storage_dir` to mirror the buffer
+    to a JSON file on every `add`. With `storage_dir=None` (the default) the
+    buffer lives only in memory — no JSON encode/decode on the hot path.
     """
 
     def __init__(
@@ -147,65 +151,55 @@ class GrainReplayBuffer:
         self.worker_count = worker_count
         self.worker_buffer_size = worker_buffer_size
 
+        self._temp_dir = None
         if storage_dir is None:
-            self._temp_dir = tempfile.mkdtemp(prefix="grain_replay_")
-            self.storage_dir = self._temp_dir
+            self.storage_dir = None
+            self.storage_path = None
         else:
             self.storage_dir = storage_dir
             os.makedirs(storage_dir, exist_ok=True)
-            self._temp_dir = None
-
-        self.storage_path = os.path.join(self.storage_dir, "experiences.json")
-
-        if not os.path.exists(self.storage_path):
-            with open(self.storage_path, "w") as f:
-                json.dump({"experiences": []}, f)
+            self.storage_path = os.path.join(self.storage_dir, "experiences.json")
 
         self._data_source = ExperienceDataSource(self.storage_path)
         self._current_epoch = 0
 
-        # Derive circular-buffer state from the existing on-disk count so that
-        # resuming a run never appends past max_size.
         existing_count = len(self._data_source)
         self._is_full: bool = existing_count >= self.max_size
         self._position: int = (
             existing_count % self.max_size if self._is_full else existing_count
         )
 
+    def _persist(self) -> None:
+        """Write the in-memory experiences to disk, if persistence is enabled."""
+        if self.storage_path is None:
+            return
+        serialized = [_serialize_experience(e) for e in self._data_source.experiences]
+        with open(self.storage_path, "w") as f:
+            json.dump({"experiences": serialized}, f)
+
     def add(self, experiences: list[Experience]) -> None:
-        """Add experiences to the buffer with FIFO eviction once full."""
-        with open(self.storage_path, "r") as f:
-            stored_exps: list[dict] = json.load(f)["experiences"]
-
+        """Add experiences to the in-memory buffer with FIFO eviction."""
+        store = self._data_source.experiences
         for exp in experiences:
-            serialized = _serialize_experience(exp)
             if self._is_full:
-                stored_exps[self._position] = serialized
+                store[self._position] = exp
             else:
-                stored_exps.append(serialized)
-                if len(stored_exps) >= self.max_size:
+                store.append(exp)
+                if len(store) >= self.max_size:
                     self._is_full = True
-
             self._position = (self._position + 1) % self.max_size
 
-        with open(self.storage_path, "w") as f:
-            json.dump({"experiences": stored_exps}, f)
-
-        self._data_source.experiences = [
-            _deserialize_experience(exp) for exp in stored_exps
-        ]
+        self._persist()
 
     def _create_dataloader(
         self, batch_size: int, shuffle: bool = True
     ) -> DataLoader | None:
-        """Create a Grain DataLoader over the current buffer contents."""
+        """Create a Grain DataLoader over the in-memory buffer contents."""
         if len(self._data_source) == 0:
             return None
 
-        data_source = ExperienceDataSource(self.storage_path)
-
         sampler = IndexSampler(
-            len(data_source),
+            len(self._data_source),
             shard_options=ShardOptions(0, 1, True),
             shuffle=shuffle,
             num_epochs=1,
@@ -219,7 +213,7 @@ class GrainReplayBuffer:
         )
 
         dataloader = DataLoader(
-            data_source=data_source,
+            data_source=self._data_source,
             sampler=sampler,
             operations=(batch_transform,),
             worker_count=self.worker_count,
@@ -250,26 +244,33 @@ class GrainReplayBuffer:
         return len(self._data_source)
 
     def __del__(self):
-        if self._temp_dir is not None:
-            import shutil
+        return
 
-            try:
-                shutil.rmtree(self._temp_dir)
-            except Exception:
-                pass
+
+def _next_pow2(n: int) -> int:
+    """Round n up to the next power of two (with a floor of 1)."""
+    return 1 if n <= 1 else 1 << (n - 1).bit_length()
 
 
 def batch_experiences(
     experiences: list[Experience],
 ) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
-    """Batch a list of experiences into padded arrays ready for training."""
+    """Batch a list of experiences into padded arrays ready for training.
+
+    Per-dimension sizes (max_polys, max_monoms) are rounded up to the next
+    power of two so the JIT-compiled training step sees a bounded set of
+    shapes across iterations.
+    """
     if not experiences:
         return {}, np.array([]), np.array([]), np.array([])
 
     batch_size = len(experiences)
-    max_polys = max(exp.num_polys for exp in experiences)
-    max_monoms = max(len(poly) for exp in experiences for poly in exp.ideal)
+    max_polys_raw = max(exp.num_polys for exp in experiences)
+    max_monoms_raw = max(len(poly) for exp in experiences for poly in exp.ideal)
     num_vars = len(experiences[0].ideal[0][0])
+
+    max_polys = _next_pow2(max_polys_raw)
+    max_monoms = _next_pow2(max_monoms_raw)
 
     batched_ideals = np.zeros(
         (batch_size, max_polys, max_monoms, num_vars), dtype=np.float32

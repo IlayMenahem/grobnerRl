@@ -22,6 +22,15 @@ import numpy as np
 import optax
 from sympy.polys.rings import PolyElement
 
+
+def _np_softmax(x: np.ndarray) -> np.ndarray:
+    """Numerically stable softmax for small numpy vectors used in MCTS."""
+    if x.size == 0:
+        return x.astype(np.float32, copy=False)
+    shifted = x - np.max(x)
+    e = np.exp(shifted)
+    return (e / e.sum()).astype(np.float32, copy=False)
+
 from grobnerRl.env import BuchbergerEnv, make_obs, reduce, spoly, update
 from grobnerRl.ideals import IdealGenerator
 from grobnerRl.models import GrobnerPolicyValue
@@ -91,9 +100,10 @@ def _evaluate(
     policy_logits, value = model(obs)
 
     flat = np.asarray(policy_logits)
-    n_polys = len(G)
+    n_padded = int(round(math.sqrt(flat.size)))
+    scores = flat.reshape(n_padded, n_padded)
     per_pair = np.array(
-        [flat[i * n_polys + j] for (i, j) in P],
+        [scores[i, j] for (i, j) in P],
         dtype=np.float32,
     )
     return per_pair, float(value)
@@ -153,7 +163,7 @@ def _mixed_value(node: Node) -> float:
     if node.prior_logits.size == 0:
         return node.value
 
-    pi = np.asarray(jax.nn.softmax(jnp.asarray(node.prior_logits)))
+    pi = _np_softmax(node.prior_logits)
     visited = node.visit_counts > 0
     sum_n = float(node.visit_counts.sum())
 
@@ -182,7 +192,7 @@ def _improved_policy(node: Node, cfg: GumbelAZConfig) -> np.ndarray:
     max_visit = float(node.visit_counts.max()) if node.visit_counts.size > 0 else 0.0
     transformed = _sigma(cq, max_visit, cfg.c_visit, cfg.c_scale)
     logits = node.prior_logits + transformed
-    return np.asarray(jax.nn.softmax(jnp.asarray(logits)), dtype=np.float32)
+    return _np_softmax(logits)
 
 
 def _select_non_root_action(node: Node, cfg: GumbelAZConfig) -> int:
