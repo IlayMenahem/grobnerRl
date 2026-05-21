@@ -6,7 +6,7 @@ import numpy as np
 from numpy.typing import ArrayLike
 from sympy.polys.rings import PolyElement
 
-from grobnerRl.envs.env import BaseEnv, GVW_buchberger, reduce, spoly
+from grobnerRl.env import BaseEnv, GVW_buchberger, reduce, spoly
 
 
 def select(

@@ -9,8 +9,8 @@ from grain.sharding import ShardOptions
 from grain.transforms import Batch
 
 from grobnerRl.data import JsonDatasource, generate_expert_data
-from grobnerRl.envs.env import BuchbergerEnv
-from grobnerRl.envs.ideals import SAT3IdealGenerator
+from grobnerRl.env import BuchbergerEnv
+from grobnerRl.ideals import SAT3IdealGenerator
 from grobnerRl.experts import BasicExpert
 from grobnerRl.models import GrobnerPolicyValue, ModelConfig
 from grobnerRl.training.supervised import (

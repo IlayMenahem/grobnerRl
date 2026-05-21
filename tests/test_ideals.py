@@ -1,7 +1,7 @@
 import itertools
 import random
 
-from grobnerRl.envs.ideals import SAT3IdealGenerator
+from grobnerRl.ideals import SAT3IdealGenerator
 
 
 def test_sat3_generator_produces_boolean_constraints_and_clauses():

@@ -18,7 +18,7 @@ from grain.sharding import ShardOptions
 from grain.transforms import Batch
 from jaxtyping import Array
 
-from grobnerRl.envs.env import BuchbergerEnv, make_obs
+from grobnerRl.env import BuchbergerEnv, make_obs
 from grobnerRl.models import GrobnerPolicyValue
 
 

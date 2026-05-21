@@ -9,7 +9,7 @@ from grain import DataLoader
 from jaxtyping import Array
 from tqdm import tqdm
 
-from grobnerRl.envs.env import BuchbergerEnv
+from grobnerRl.env import BuchbergerEnv
 from grobnerRl.experts import Expert
 from grobnerRl.training.utils import save_checkpoint
 from grobnerRl.types import Action, Observation

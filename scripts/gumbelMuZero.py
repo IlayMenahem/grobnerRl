@@ -12,8 +12,8 @@ import equinox as eqx
 import jax
 import optax
 
-from grobnerRl.envs.env import BuchbergerEnv
-from grobnerRl.envs.ideals import SAT3IdealGenerator
+from grobnerRl.env import BuchbergerEnv
+from grobnerRl.ideals import SAT3IdealGenerator
 from grobnerRl.models import GrobnerPolicyValue, ModelConfig
 from grobnerRl.training.gumbelMuZero import (
     GumbelMuZeroConfig,

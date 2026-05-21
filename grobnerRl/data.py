@@ -9,8 +9,8 @@ import numpy as np
 from grain.sources import RandomAccessDataSource
 from tqdm import tqdm
 
-from grobnerRl.envs.env import BaseEnv, BuchbergerEnv, tokenize
-from grobnerRl.envs.ideals import SAT3IdealGenerator
+from grobnerRl.env import BaseEnv, BuchbergerEnv, tokenize
+from grobnerRl.ideals import SAT3IdealGenerator
 from grobnerRl.experts import BasicExpert, Expert
 from grobnerRl.types import Action, Observation
 
@@ -105,8 +105,9 @@ def _generate_episode_data(args):
     ideal_dist, n_simulations, c, gamma_agent, rollout_policy = args
 
     # Import here to avoid issues with multiprocessing
-    from grobnerRl.envs.env import BuchbergerEnv, MCTSAgent
-    from grobnerRl.envs.ideals import IdealGenerator, parse_ideal_dist
+    from grobnerRl.envs.agents import MCTSAgent
+    from grobnerRl.env import BuchbergerEnv
+    from grobnerRl.ideals import IdealGenerator, parse_ideal_dist
 
     ideal_generator = (
         ideal_dist if isinstance(ideal_dist, IdealGenerator) else parse_ideal_dist(ideal_dist)

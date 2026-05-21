@@ -28,7 +28,7 @@ import numpy as np
 import optax
 from jaxtyping import Array
 
-from grobnerRl.envs.env import BuchbergerEnv, make_obs
+from grobnerRl.env import BuchbergerEnv, make_obs
 from grobnerRl.models import GrobnerPolicyValue
 from grobnerRl.training.utils import (
     create_metrics_log_path,

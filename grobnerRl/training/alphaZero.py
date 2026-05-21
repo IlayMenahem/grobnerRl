@@ -22,7 +22,7 @@ import jax
 import numpy as np
 from jaxtyping import PRNGKeyArray
 
-from grobnerRl.envs.env import BuchbergerEnv, make_obs
+from grobnerRl.env import BuchbergerEnv, make_obs
 from grobnerRl.models import GrobnerPolicyValue
 from grobnerRl.training.shared import (
     Experience,

@@ -4,8 +4,8 @@ Benchmark script for comparing MCTS agent with standard selection strategies.
 
 if __name__ == "__main__":
     from grobnerRl.benchmark.benchmark import benchmark_expert
-    from grobnerRl.envs.env import BuchbergerEnv
-    from grobnerRl.envs.ideals import SAT3IdealGenerator
+    from grobnerRl.env import BuchbergerEnv
+    from grobnerRl.ideals import SAT3IdealGenerator
     from grobnerRl.experts import BasicExpert
 
     num_vars = 5

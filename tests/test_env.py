@@ -6,7 +6,7 @@ import pytest
 import sympy as sp
 from sympy.polys.rings import PolyElement
 
-from grobnerRl.envs.env import (
+from grobnerRl.env import (
     BuchbergerEnv,
     GVW_buchberger,
     GVWEnv,
@@ -19,10 +19,10 @@ from grobnerRl.envs.env import (
     tokenize,
     update,
 )
-from grobnerRl.envs.env import (
+from grobnerRl.env import (
     reduce as poly_reduce,
 )
-from grobnerRl.envs.ideals import IdealGenerator
+from grobnerRl.ideals import IdealGenerator
 
 R, x, y = sp.ring("x,y", sp.QQ, "lex")
 
