@@ -13,10 +13,9 @@ from grobnerRl.models import GrobnerPolicyValue, ModelConfig
 from grobnerRl.training.gumbelMuZero import GumbelAZConfig, train_iteration
 from grobnerRl.training.shared import GrainReplayBuffer, TrainConfig
 
-
-def main() -> None:
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-iterations", type=int, default=1)
+    parser.add_argument("--num-iterations", type=int, default=10)
     parser.add_argument("--num-episodes-per-iter", type=int, default=2)
     parser.add_argument("--num-simulations", type=int, default=8)
     parser.add_argument("--max-considered-actions", type=int, default=8)
@@ -41,7 +40,7 @@ def main() -> None:
     env = BuchbergerEnv(ideal_gen)
 
     config = ModelConfig(
-        monomials_dim=num_vars + 1,
+        monomials_dim=num_vars,
         monoms_embedding_dim=32,
         polys_embedding_dim=64,
         poly_embedder_depth=2,
@@ -84,7 +83,3 @@ def main() -> None:
             base_seed=args.seed + it * args.num_episodes_per_iter,
         )
         print(f"iter {it}: {metrics}")
-
-
-if __name__ == "__main__":
-    main()

@@ -26,13 +26,7 @@ def tokenize(ideal: Sequence[PolyElement]) -> list[ArrayLike]:
     Returns: tokenized ideal
     """
     polys_monomials = [
-        np.concat(
-            (
-                np.array(list(map(int, poly.coeffs()))).reshape((1, -1)).T,
-                np.array(poly.monoms()),
-            ),
-            axis=1,
-        )
+        np.array(poly.monoms())
         for poly in ideal
         if poly != 0
     ]
