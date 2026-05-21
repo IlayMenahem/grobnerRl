@@ -3,7 +3,6 @@
 import json
 import os
 import tempfile
-from collections.abc import Sequence
 from copy import copy
 from dataclasses import dataclass
 from typing import Iterator
@@ -64,9 +63,9 @@ def get_valid_actions(env: BuchbergerEnv) -> list[int]:
 class Experience:
     """Uncompressed experience for Grain-based replay buffer."""
 
-    ideal: tuple[np.ndarray, ...]  # Raw polynomials
+    ideal: tuple[np.ndarray, ...]
     selectables: tuple[tuple[int, int], ...]
-    policy: np.ndarray  # Dense policy array
+    policy: np.ndarray  # Dense policy array over (num_polys * num_polys) actions
     value: float
     num_polys: int
 
@@ -107,25 +106,17 @@ def _deserialize_experience(data: dict) -> Experience:
 
 
 class ExperienceDataSource(grain.RandomAccessDataSource):
-    """Grain data source for experiences stored in JSON file."""
+    """Grain data source for experiences stored in a JSON file."""
 
     def __init__(self, storage_path: str):
-        """
-        Initialize data source from storage file.
-
-        Args:
-            storage_path: Path to JSON file containing experiences
-        """
         self.storage_path = storage_path
-        self.experiences = []
+        self.experiences: list[Experience] = []
 
-        # Load and deserialize all experiences if file exists
         if os.path.exists(storage_path):
             with open(storage_path, "r") as f:
                 data = json.load(f)
-                raw_experiences = data.get("experiences", [])
                 self.experiences = [
-                    _deserialize_experience(exp) for exp in raw_experiences
+                    _deserialize_experience(exp) for exp in data.get("experiences", [])
                 ]
 
     def __len__(self) -> int:
@@ -134,7 +125,6 @@ class ExperienceDataSource(grain.RandomAccessDataSource):
     def __getitem__(self, index) -> Experience:
         if isinstance(index, slice):
             raise TypeError("Slicing not supported, use individual indices")
-
         return self.experiences[int(index)]
 
 
@@ -153,15 +143,6 @@ class GrainReplayBuffer:
         worker_count: int = 1,
         worker_buffer_size: int = 4,
     ):
-        """
-        Initialize replay buffer with file-based storage.
-
-        Args:
-            max_size: Maximum number of experiences to store.
-            storage_dir: Directory to store experience files (uses temp dir if None).
-            worker_count: Number of workers for data loading.
-            worker_buffer_size: Buffer size per worker.
-        """
         self.max_size = max_size
         self.worker_count = worker_count
         self.worker_buffer_size = worker_buffer_size
@@ -207,11 +188,9 @@ class GrainReplayBuffer:
 
             self._position = (self._position + 1) % self.max_size
 
-        # Write back to file
         with open(self.storage_path, "w") as f:
             json.dump({"experiences": stored_exps}, f)
 
-        # Update data source with deserialized experiences
         self._data_source.experiences = [
             _deserialize_experience(exp) for exp in stored_exps
         ]
@@ -219,14 +198,12 @@ class GrainReplayBuffer:
     def _create_dataloader(
         self, batch_size: int, shuffle: bool = True
     ) -> DataLoader | None:
-        """Create Grain DataLoader with IndexSampler and multiple workers."""
+        """Create a Grain DataLoader over the current buffer contents."""
         if len(self._data_source) == 0:
             return None
 
-        # Recreate data source to get fresh file handle
         data_source = ExperienceDataSource(self.storage_path)
 
-        # Create IndexSampler with current epoch as seed
         sampler = IndexSampler(
             len(data_source),
             shard_options=ShardOptions(0, 1, True),
@@ -235,12 +212,12 @@ class GrainReplayBuffer:
             seed=self._current_epoch if shuffle else 0,
         )
 
-        # Batch transformation
         batch_transform = Batch(
-            batch_size, drop_remainder=False, batch_fn=batch_experiences_grain
+            batch_size,
+            drop_remainder=False,
+            batch_fn=lambda exps: batch_experiences(list(exps)),
         )
 
-        # Create DataLoader with workers
         dataloader = DataLoader(
             data_source=data_source,
             sampler=sampler,
@@ -254,54 +231,25 @@ class GrainReplayBuffer:
 
         return dataloader
 
-    def sample(self, batch_size: int) -> list[Experience]:
-        """Sample random batch of experiences."""
-        if len(self._data_source) == 0:
-            return []
-
-        indices = np.random.choice(
-            len(self._data_source),
-            size=min(batch_size, len(self._data_source)),
-            replace=False,
-        )
-        return [self._data_source[int(i)] for i in indices]
-
     def sample_batched(
         self, batch_size: int
     ) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
-        """Sample and batch experiences using Grain DataLoader with IndexSampler."""
-        dataloader = self._create_dataloader(batch_size=batch_size, shuffle=True)
-
-        if dataloader is None:
-            return {}, np.array([]), np.array([]), np.array([])
-
-        # Get first batch from dataloader
-        for batch in dataloader:
+        """Sample one batch of experiences."""
+        for batch in self.iter_dataset(batch_size=batch_size, shuffle=True):
             return batch
-
-        # If no batch available, return empty
         return {}, np.array([]), np.array([]), np.array([])
 
     def iter_dataset(
         self, batch_size: int, shuffle: bool = True
     ) -> Iterator[tuple[dict, np.ndarray, np.ndarray, np.ndarray]]:
-        """
-        Create iterator over batches using Grain DataLoader.
-
-        Useful for multiple epochs of training on the same data.
-        """
+        """Iterate over all experiences in batches using a Grain DataLoader."""
         dataloader = self._create_dataloader(batch_size=batch_size, shuffle=shuffle)
-
-        if dataloader is None:
-            return iter([])
-
-        return iter(dataloader)
+        return iter(dataloader) if dataloader is not None else iter([])
 
     def __len__(self) -> int:
         return len(self._data_source)
 
     def __del__(self):
-        """Cleanup temporary directory if created."""
         if self._temp_dir is not None:
             import shutil
 
@@ -311,30 +259,17 @@ class GrainReplayBuffer:
                 pass
 
 
-def batch_experiences_grain(
-    experiences: Sequence[Experience],
-) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Batch function for Grain DataLoader.
-
-    Compatible with Grain's Batch transform.
-    """
-    return batch_experiences(list(experiences))
-
-
 def batch_experiences(
     experiences: list[Experience],
 ) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
-    """Batch uncompressed experiences for training."""
+    """Batch a list of experiences into padded arrays ready for training."""
     if not experiences:
         return {}, np.array([]), np.array([]), np.array([])
 
     batch_size = len(experiences)
     max_polys = max(exp.num_polys for exp in experiences)
-
-    first_ideal = experiences[0].ideal
-    max_monoms = max(max(len(p) for p in exp.ideal) for exp in experiences)
-    num_vars = len(first_ideal[0][0])
+    max_monoms = max(len(poly) for exp in experiences for poly in exp.ideal)
+    num_vars = len(experiences[0].ideal[0][0])
 
     batched_ideals = np.zeros(
         (batch_size, max_polys, max_monoms, num_vars), dtype=np.float32
@@ -349,37 +284,30 @@ def batch_experiences(
     loss_mask = np.ones(batch_size, dtype=np.float32)
 
     for i, exp in enumerate(experiences):
-        ideal = exp.ideal
-        batched_poly_masks[i, : len(ideal)] = True
+        batched_poly_masks[i, : len(exp.ideal)] = True
 
-        for j, poly in enumerate(ideal):
-            p_len = len(poly)
-            batched_ideals[i, j, :p_len] = poly
-            batched_monomial_masks[i, j, :p_len] = True
+        for j, poly in enumerate(exp.ideal):
+            batched_ideals[i, j, : len(poly)] = poly
+            batched_monomial_masks[i, j, : len(poly)] = True
 
         if exp.selectables:
             rows, cols = zip(*exp.selectables)
             batched_selectables[i, rows, cols] = 0.0
 
-        for idx in range(len(exp.policy)):
-            if exp.policy[idx] > 0:
-                orig_i = idx // exp.num_polys
-                orig_j = idx % exp.num_polys
-                batched_policies[i, orig_i * max_polys + orig_j] = exp.policy[idx]
+        for idx, prob in enumerate(exp.policy):
+            if prob > 0:
+                orig_i, orig_j = idx // exp.num_polys, idx % exp.num_polys
+                batched_policies[i, orig_i * max_polys + orig_j] = prob
 
         batched_values[i] = exp.value
 
-    return (
-        {
-            "ideals": batched_ideals,
-            "monomial_masks": batched_monomial_masks,
-            "poly_masks": batched_poly_masks,
-            "selectables": batched_selectables,
-        },
-        batched_policies,
-        batched_values,
-        loss_mask,
-    )
+    observations = {
+        "ideals": batched_ideals,
+        "monomial_masks": batched_monomial_masks,
+        "poly_masks": batched_poly_masks,
+        "selectables": batched_selectables,
+    }
+    return observations, batched_policies, batched_values, loss_mask
 
 
 def policy_value_loss(
@@ -397,9 +325,9 @@ def policy_value_loss(
     Args:
         model: The GrobnerPolicyValue model.
         observations: Batched observations dict.
-        target_policies: Target policies (batch_size, max_actions).
-        values: Target values (batch_size,).
-        loss_mask: Mask for valid samples (batch_size,).
+        target_policies: Target policy distributions (batch_size, max_actions).
+        values: Target state values (batch_size,).
+        loss_mask: Binary mask for valid samples (batch_size,).
         policy_loss_weight: Scalar weight applied to the policy loss term.
         value_loss_weight: Scalar weight applied to the value loss term.
 
@@ -408,24 +336,21 @@ def policy_value_loss(
     """
     policy_logits, pred_values = eqx.filter_vmap(model)(observations)
 
-    policy_loss = optax.softmax_cross_entropy(
-        policy_logits, target_policies, where=target_policies > 0
-    )
+    policy_loss = optax.safe_softmax_cross_entropy(policy_logits, target_policies)
     value_loss = optax.huber_loss(pred_values, values)
-
     total_loss = policy_loss_weight * policy_loss + value_loss_weight * value_loss
 
-    masked_loss = (total_loss * loss_mask).sum() / (loss_mask.sum() + 1e-9)
-    masked_policy_loss = (policy_loss * loss_mask).sum() / (loss_mask.sum() + 1e-9)
-    masked_value_loss = (value_loss * loss_mask).sum() / (loss_mask.sum() + 1e-9)
+    normalizer = loss_mask.sum() + 1e-9
+    masked_total_loss = (total_loss * loss_mask).sum() / normalizer
+    masked_policy_loss = (policy_loss * loss_mask).sum() / normalizer
+    masked_value_loss = (value_loss * loss_mask).sum() / normalizer
 
     metrics = {
         "policy_loss": masked_policy_loss,
         "value_loss": masked_value_loss,
-        "total_loss": masked_loss,
+        "total_loss": masked_total_loss,
     }
-
-    return masked_loss, metrics
+    return masked_total_loss, metrics
 
 
 def train_policy_value(
@@ -436,7 +361,7 @@ def train_policy_value(
     opt_state: optax.OptState,
 ) -> tuple[GrobnerPolicyValue, optax.OptState, dict]:
     """
-    Train the model on replay buffer data using Grain DataLoader.
+    Train the model on replay buffer data.
 
     Args:
         model: The GrobnerPolicyValue model.
@@ -446,7 +371,7 @@ def train_policy_value(
         opt_state: Current optimizer state.
 
     Returns:
-        Tuple of (trained_model, new_opt_state, metrics).
+        Tuple of (trained_model, new_opt_state, mean_metrics).
     """
 
     @eqx.filter_jit
@@ -458,8 +383,8 @@ def train_policy_value(
         values: Array,
         loss_mask: Array,
     ) -> tuple[GrobnerPolicyValue, optax.OptState, Array, dict]:
-        def loss_fn(m):
-            return policy_value_loss(
+        (loss, metrics), grads = eqx.filter_value_and_grad(
+            lambda m: policy_value_loss(
                 m,
                 observations,
                 target_policies,
@@ -467,19 +392,21 @@ def train_policy_value(
                 loss_mask,
                 train_config.policy_loss_weight,
                 train_config.value_loss_weight,
-            )
-
-        (loss, metrics), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(model)
+            ),
+            has_aux=True,
+        )(model)
         updates, opt_state = optimizer.update(
             grads, opt_state, eqx.filter(model, eqx.is_array)
         )
-        model = eqx.apply_updates(model, updates)
-        return model, opt_state, loss, metrics
+        return eqx.apply_updates(model, updates), opt_state, loss, metrics
 
-    epoch_metrics = {"policy_loss": [], "value_loss": [], "total_loss": []}
+    epoch_metrics: dict[str, list[float]] = {
+        "policy_loss": [],
+        "value_loss": [],
+        "total_loss": [],
+    }
 
     for _ in range(train_config.num_epochs_per_iteration):
-        # Use iter_dataset to iterate through all batches
         for (
             observations,
             target_policies,
@@ -488,7 +415,6 @@ def train_policy_value(
         ) in replay_buffer.iter_dataset(
             batch_size=train_config.batch_size, shuffle=True
         ):
-            # Convert to JAX arrays
             observations = {k: jnp.array(v) for k, v in observations.items()}
             target_policies = jnp.array(target_policies)
             values = jnp.array(values)
@@ -501,7 +427,9 @@ def train_policy_value(
             for k, v in metrics.items():
                 epoch_metrics[k].append(float(v))
 
-    mean_metrics = {k: np.mean(v) if v else 0.0 for k, v in epoch_metrics.items()}
+    mean_metrics = {
+        k: float(np.mean(v)) if v else 0.0 for k, v in epoch_metrics.items()
+    }
     return model, opt_state, mean_metrics
 
 
@@ -519,10 +447,20 @@ def evaluate_model(
         num_episodes: Number of episodes to evaluate.
 
     Returns:
-        Dictionary with evaluation metrics.
+        Dictionary with mean/std of reward and episode length.
     """
-    episode_rewards = []
-    episode_lengths = []
+
+    def greedy_action(
+        policy_logits: np.ndarray, pairs: list[tuple[int, int]], num_polys: int
+    ) -> tuple[int, int]:
+        mask = np.full(policy_logits.shape, float("-inf"))
+        for i, j in pairs:
+            mask[i * num_polys + j] = 0.0
+        action = int(np.argmax(policy_logits + mask))
+        return action // num_polys, action % num_polys
+
+    episode_rewards: list[float] = []
+    episode_lengths: list[int] = []
 
     for seed in range(num_episodes):
         env.reset(seed=seed)
@@ -531,23 +469,10 @@ def evaluate_model(
         done = False
 
         while not done:
-            obs = make_obs(env.generators, env.pairs)
-            policy_logits, _ = model(obs)
-            policy_logits = np.array(policy_logits)
-
-            valid_actions = []
-            num_polys = len(env.generators)
-            for i, j in env.pairs:
-                valid_actions.append(i * num_polys + j)
-
-            mask = np.full(policy_logits.shape, float("-inf"))
-            for a in valid_actions:
-                mask[a] = 0.0
-            masked_logits = policy_logits + mask
-
-            action = int(np.argmax(masked_logits))
-            i, j = action // num_polys, action % num_polys
-
+            policy_logits, _ = model(make_obs(env.generators, env.pairs))
+            i, j = greedy_action(
+                np.array(policy_logits), env.pairs, len(env.generators)
+            )
             _, reward, terminated, truncated, _ = env.step((i, j))
             total_reward += reward
             steps += 1
@@ -557,8 +482,8 @@ def evaluate_model(
         episode_lengths.append(steps)
 
     return {
-        "mean_reward": np.mean(episode_rewards),
-        "std_reward": np.std(episode_rewards),
-        "mean_length": np.mean(episode_lengths),
-        "std_length": np.std(episode_lengths),
+        "mean_reward": float(np.mean(episode_rewards)),
+        "std_reward": float(np.std(episode_rewards)),
+        "mean_length": float(np.mean(episode_lengths)),
+        "std_length": float(np.std(episode_lengths)),
     }

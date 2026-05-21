@@ -8,9 +8,9 @@ if __name__ == "__main__":
     from grobnerRl.envs.ideals import SAT3IdealGenerator
     from grobnerRl.experts import BasicExpert
 
-    num_vars = 3
-    multiplier = None
-    num_clauses = int(13)
+    num_vars = 5
+    multiplier = 2
+    num_clauses = int(num_vars * multiplier)
 
     ideal_dist = SAT3IdealGenerator(num_vars, num_clauses)
     num_episodes = 100

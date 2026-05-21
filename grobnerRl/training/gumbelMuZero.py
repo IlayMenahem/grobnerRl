@@ -27,6 +27,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, PRNGKeyArray
+from tqdm import tqdm
 
 from grobnerRl.envs.env import BuchbergerEnv, make_obs
 from grobnerRl.models import GrobnerPolicyValue
@@ -121,8 +122,7 @@ def sigma(
         Transformed Q-values (sigma values).
     """
     max_visit = visit_counts.max() if len(visit_counts) > 0 else 0
-    scale_factor = (c_visit + max_visit) * c_scale
-    return scale_factor * q_values
+    return (c_visit + max_visit) * c_scale * q_values
 
 
 def sample_gumbel(key: PRNGKeyArray, shape: tuple[int, ...]) -> Array:
@@ -155,7 +155,6 @@ def gumbel_top_k(
     """
     valid_logits = logits[valid_actions]
     gumbel_noise = np.array(sample_gumbel(key, (len(valid_actions),)))
-
     perturbed = valid_logits + gumbel_noise
 
     k = min(k, len(valid_actions))
@@ -164,7 +163,6 @@ def gumbel_top_k(
 
     selected_actions = np.array([valid_actions[i] for i in top_k_indices])
     gumbel_values = gumbel_noise[top_k_indices]
-
     return selected_actions, gumbel_values
 
 
@@ -196,17 +194,11 @@ def expand_node(node: GumbelNode, model: GrobnerPolicyValue) -> None:
     node.num_polys = len(node.env.generators)
     node.valid_actions = get_valid_actions(node.env)
 
-    # Initialize children with priors from softmax over valid logits
-    if node.valid_actions:
-        valid_logits = node.policy_logits[node.valid_actions]
-        max_logit = valid_logits.max()
-        exp_logits = np.exp(valid_logits - max_logit)
-        probs = exp_logits / exp_logits.sum()
-        for va, p in zip(node.valid_actions, probs):
-            if va not in node.children:
-                node.children[va] = GumbelNode(prior=float(p))
-            else:
-                node.children[va].prior = float(p)
+    valid_logits = node.policy_logits[node.valid_actions]
+    exp_logits = np.exp(valid_logits - valid_logits.max())
+    probs = exp_logits / exp_logits.sum()
+    for action, prior in zip(node.valid_actions, probs):
+        node.children[action] = GumbelNode(prior=float(prior))
 
 
 def compute_v_mix(node: GumbelNode) -> float:
@@ -226,32 +218,72 @@ def compute_v_mix(node: GumbelNode) -> float:
     Returns:
         The v_mix value estimate.
     """
-    total_visits = sum(
-        node.children[a].visit_count for a in node.valid_actions if a in node.children
-    )
+    total_visits = 0
+    visited_prior_sum = 0.0
+    weighted_q_sum = 0.0
+
+    for action in node.valid_actions:
+        child = node.children.get(action)
+        if child is None:
+            continue
+        total_visits += child.visit_count
+        if child.visit_count > 0:
+            visited_prior_sum += child.prior
+            weighted_q_sum += child.prior * child.q_value
 
     if total_visits == 0:
         return node.network_value
 
-    visited_prior_sum = sum(
-        node.children[a].prior
-        for a in node.valid_actions
-        if a in node.children and node.children[a].visit_count > 0
-    )
-    weighted_q_sum = sum(
-        node.children[a].prior * node.children[a].q_value
-        for a in node.valid_actions
-        if a in node.children and node.children[a].visit_count > 0
-    )
+    if visited_prior_sum == 0:
+        return node.network_value
 
-    if visited_prior_sum > 0:
-        v_mix = (
-            node.network_value + (total_visits / visited_prior_sum) * weighted_q_sum
-        ) / (1 + total_visits)
-    else:
-        v_mix = node.network_value
+    return (
+        node.network_value + (total_visits / visited_prior_sum) * weighted_q_sum
+    ) / (1 + total_visits)
 
-    return v_mix
+
+def _score_actions(
+    actions: np.ndarray,
+    policy_logits: np.ndarray,
+    children: dict[int, GumbelNode],
+    min_max_stats: MinMaxStats,
+    config: GumbelMuZeroConfig,
+    v_mix: float,
+    gumbel_values: np.ndarray | None = None,
+) -> np.ndarray:
+    """
+    Score a set of actions by g(a) + logits(a) + σ(normalizedQ(a)).
+
+    Used in both Sequential Halving (with Gumbel noise) and non-root action
+    selection (without Gumbel noise, as a policy-improvement step).
+
+    Args:
+        actions: Action indices to score.
+        policy_logits: Full policy logit array.
+        children: Child nodes of the node being scored.
+        min_max_stats: Tree-wide min/max statistics for Q-value normalization.
+        config: Gumbel MuZero configuration.
+        v_mix: Fallback value for unvisited actions (Eq. 10).
+        gumbel_values: Per-action Gumbel noise; zeros if None (non-root case).
+
+    Returns:
+        Score array aligned with `actions`.
+    """
+    q_values = np.array(
+        [
+            children[int(a)].q_value
+            if int(a) in children and children[int(a)].visit_count > 0
+            else v_mix
+            for a in actions
+        ]
+    )
+    visit_counts = np.array(
+        [children[int(a)].visit_count if int(a) in children else 0 for a in actions]
+    )
+    normalized_q = np.array([min_max_stats.normalize(q) for q in q_values])
+    sigma_values = sigma(normalized_q, visit_counts, config.c_visit, config.c_scale)
+    gumbels = gumbel_values if gumbel_values is not None else np.zeros(len(actions))
+    return gumbels + policy_logits[actions] + sigma_values
 
 
 def select_non_root_action(
@@ -263,10 +295,9 @@ def select_non_root_action(
     Select action at a non-root node using Equation 14 from the paper (Section 5).
 
     Computes the improved policy π' = softmax(logits + σ(completedQ)) using
-    completed Q-values, then selects the action that minimizes the MSE between
-    π' and the normalized visit counts:
+    completed Q-values, then selects the action that maximizes:
 
-        argmax_a (π'(a) - N(a) / (1 + Σ_b N(b)))
+        π'(a) - N(a) / (1 + Σ_b N(b))
 
     This deterministic selection ensures visit counts converge to the improved
     policy, avoiding the variance of stochastic sampling at non-root nodes.
@@ -282,50 +313,27 @@ def select_non_root_action(
     if not node.valid_actions or node.policy_logits is None:
         return None
 
+    actions = np.array(node.valid_actions)
     v_mix = compute_v_mix(node)
+    scores = _score_actions(
+        actions, node.policy_logits, node.children, min_max_stats, config, v_mix
+    )
 
-    # Build completed Q-values (Eq. 10 with v_mix)
-    completed_q = {}
-    for a in node.valid_actions:
-        if a in node.children and node.children[a].visit_count > 0:
-            completed_q[a] = node.children[a].q_value
-        else:
-            completed_q[a] = v_mix
+    # Improved policy π' = softmax(logits + σ(completedQ))
+    exp_scores = np.exp(scores - scores.max())
+    pi_prime = exp_scores / exp_scores.sum()
 
-    # Normalize Q-values using tree-wide min-max stats
-    normalized_q = {a: min_max_stats.normalize(q) for a, q in completed_q.items()}
-
-    # Compute sigma transformation
     visit_counts = np.array(
         [
             node.children[a].visit_count if a in node.children else 0
             for a in node.valid_actions
         ]
     )
-    max_visit = visit_counts.max() if len(visit_counts) > 0 else 0
-    scale = (config.c_visit + max_visit) * config.c_scale
-
-    # Compute improved policy π' = softmax(logits + σ(normalized_completedQ))
-    improved_logits = np.array(
-        [node.policy_logits[a] + scale * normalized_q[a] for a in node.valid_actions]
-    )
-    max_l = improved_logits.max()
-    exp_l = np.exp(improved_logits - max_l)
-    pi_prime = exp_l / exp_l.sum()
-
-    # Select argmax_a (π'(a) - N(a) / (1 + Σ_b N(b))) [Eq. 14]
     total_visits = int(visit_counts.sum())
 
-    best_action = None
-    best_score = -float("inf")
-    for idx, a in enumerate(node.valid_actions):
-        vc = visit_counts[idx]
-        score = pi_prime[idx] - vc / (1 + total_visits)
-        if score > best_score:
-            best_score = score
-            best_action = a
-
-    return best_action
+    # argmax π'(a) - N(a) / (1 + Σ_b N(b))  [Eq. 14]
+    advantages = pi_prime - visit_counts / (1 + total_visits)
+    return int(node.valid_actions[int(np.argmax(advantages))])
 
 
 def backup(
@@ -391,12 +399,10 @@ def run_simulation(
     while True:
         path.append((node, action))
 
-        # Get or create child node
         if action not in node.children:
             node.children[action] = GumbelNode(prior=0.0)
         child = node.children[action]
 
-        # Leaf node: expand, then backup
         if not child.expanded:
             child.env = copy_env(node.env)
             i, j = action // node.num_polys, action % node.num_polys
@@ -416,17 +422,14 @@ def run_simulation(
             backup(path, leaf_value, config, min_max_stats)
             return
 
-        # Terminal node: backup with value 0
         if child.is_terminal:
             backup(path, 0.0, config, min_max_stats)
             return
 
-        # Internal node: select next action using non-root policy (Eq. 14)
         node = child
         next_action = select_non_root_action(node, config, min_max_stats)
 
         if next_action is None:
-            # Safety fallback: no valid actions (should not happen for non-terminal)
             backup(path, node.network_value, config, min_max_stats)
             return
 
@@ -466,7 +469,6 @@ def sequential_halving(
         Selected action index (A_{n+1}).
     """
     if len(actions) == 1:
-        # Still run simulations to build the tree for Q-value estimates
         for _ in range(config.num_simulations):
             run_simulation(root, int(actions[0]), model, config, min_max_stats)
         return int(actions[0])
@@ -475,81 +477,57 @@ def sequential_halving(
     remaining_gumbels = gumbel_values.copy()
 
     num_phases = max(1, int(np.ceil(np.log2(len(actions)))))
-    total_budget = config.num_simulations
     sims_used = 0
 
-    for phase in range(num_phases):
+    for _ in range(num_phases):
         if len(remaining_actions) <= 1:
             break
 
-        # Budget per phase: n / ceil(log2(m))
-        phase_budget = total_budget // num_phases
-        # At least 1 visit per action per phase
+        phase_budget = config.num_simulations // num_phases
         sims_per_action = max(1, phase_budget // len(remaining_actions))
 
-        # Run MCTS simulations for each remaining action
         for action in remaining_actions:
             for _ in range(sims_per_action):
-                if sims_used >= total_budget:
+                if sims_used >= config.num_simulations:
                     break
                 run_simulation(root, int(action), model, config, min_max_stats)
                 sims_used += 1
-            if sims_used >= total_budget:
+            if sims_used >= config.num_simulations:
                 break
 
-        # Score remaining actions: g(a) + logits(a) + σ(q̂(a))
-        q_values = np.array(
-            [
-                root.children[int(a)].q_value if int(a) in root.children else 0.0
-                for a in remaining_actions
-            ]
-        )
-        visit_counts = np.array(
-            [
-                root.children[int(a)].visit_count if int(a) in root.children else 0
-                for a in remaining_actions
-            ]
+        v_mix = compute_v_mix(root)
+        scores = _score_actions(
+            remaining_actions,
+            policy_logits,
+            root.children,
+            min_max_stats,
+            config,
+            v_mix,
+            gumbel_values=remaining_gumbels,
         )
 
-        # Normalize Q-values using tree-wide min-max stats
-        normalized_q = np.array([min_max_stats.normalize(q) for q in q_values])
-
-        action_logits = policy_logits[remaining_actions]
-        sigma_values = sigma(normalized_q, visit_counts, config.c_visit, config.c_scale)
-        scores = remaining_gumbels + action_logits + sigma_values
-
-        # Keep top half
         num_to_keep = max(1, len(remaining_actions) // 2)
         top_indices = np.argsort(scores)[-num_to_keep:]
         remaining_actions = remaining_actions[top_indices]
         remaining_gumbels = remaining_gumbels[top_indices]
 
-        if sims_used >= total_budget:
+        if sims_used >= config.num_simulations:
             break
 
-    # Final selection from remaining actions
     if len(remaining_actions) == 1:
         return int(remaining_actions[0])
 
-    # Select action with highest g(a) + logits(a) + σ(q̂(a))
-    q_values = np.array(
-        [
-            root.children[int(a)].q_value if int(a) in root.children else 0.0
-            for a in remaining_actions
-        ]
+    v_mix = compute_v_mix(root)
+    scores = _score_actions(
+        remaining_actions,
+        policy_logits,
+        root.children,
+        min_max_stats,
+        config,
+        v_mix,
+        gumbel_values=remaining_gumbels,
     )
-    visit_counts = np.array(
-        [
-            root.children[int(a)].visit_count if int(a) in root.children else 0
-            for a in remaining_actions
-        ]
-    )
-    normalized_q = np.array([min_max_stats.normalize(q) for q in q_values])
-    action_logits = policy_logits[remaining_actions]
-    sigma_values = sigma(normalized_q, visit_counts, config.c_visit, config.c_scale)
-    scores = remaining_gumbels + action_logits + sigma_values
-    best_idx = np.argmax(scores)
-    return int(remaining_actions[best_idx])
+    return int(remaining_actions[np.argmax(scores)])
 
 
 class GumbelMuZeroSearch:
@@ -564,22 +542,8 @@ class GumbelMuZeroSearch:
     5. Return improved policy as training target and root value estimate
     """
 
-    def __init__(
-        self,
-        model: GrobnerPolicyValue,
-        env: BuchbergerEnv,
-        config: GumbelMuZeroConfig,
-    ):
-        """
-        Initialize Gumbel MuZero search.
-
-        Args:
-            model: Neural network model for policy and value.
-            env: Environment (used as template; actual search copies state).
-            config: Search configuration.
-        """
+    def __init__(self, model: GrobnerPolicyValue, config: GumbelMuZeroConfig):
         self.model = model
-        self.env = env
         self.config = config
 
     @overload
@@ -605,7 +569,7 @@ class GumbelMuZeroSearch:
         return_selected_action: bool = False,
     ) -> tuple[np.ndarray, float] | tuple[np.ndarray, float, int | None]:
         """
-        Run Gumbel MuZero search from current state.
+        Run Gumbel MuZero search from the given environment state.
 
         Performs Gumbel-Top-k sampling, Sequential Halving with full MCTS,
         and constructs the improved policy for training.
@@ -613,102 +577,72 @@ class GumbelMuZeroSearch:
         Args:
             env: Current environment state.
             key: JAX random key.
-            return_selected_action: If True, also return root action selected by
-                Sequential Halving (A_{n+1}) for acting in the environment.
+            return_selected_action: If True, also return the root action selected
+                by Sequential Halving (A_{n+1}) for acting in the environment.
 
         Returns:
-            Tuple of (improved_policy, value):
-                - improved_policy: π' = softmax(logits + σ(completedQ)) (Eq. 11)
-                - value: Root value estimate from the neural network
-            If return_selected_action=True, returns:
-                - improved_policy, value, selected_action
+            (improved_policy, value) where improved_policy is
+            π' = softmax(logits + σ(completedQ)) (Eq. 11) and value is the
+            root network value estimate. If return_selected_action is True,
+            appends the selected action as a third element.
         """
         num_polys = len(env.generators)
+        empty_policy = np.zeros(num_polys * num_polys, dtype=np.float32)
 
-        # Initialize and expand root node
         root = GumbelNode(env=copy_env(env))
         expand_node(root, self.model)
 
-        value = root.network_value
-        policy_logits = root.policy_logits
-        valid_actions = root.valid_actions
-        if policy_logits is None:
+        if root.policy_logits is None:
             raise ValueError("Root expansion did not produce policy logits")
 
-        if len(valid_actions) == 0:
-            empty_policy = np.zeros(num_polys * num_polys)
-            if return_selected_action:
-                return empty_policy, value, None
-            return empty_policy, value
+        if not root.valid_actions:
+            return (
+                (empty_policy, root.network_value, None)
+                if return_selected_action
+                else (empty_policy, root.network_value)
+            )
 
-        # Initialize tree-wide min-max stats for Q-value normalization
         min_max_stats = MinMaxStats()
+        k = min(self.config.max_num_considered_actions, len(root.valid_actions))
+        actions, gumbel_values = gumbel_top_k(
+            key, root.policy_logits, root.valid_actions, k
+        )
 
-        # Gumbel-Top-k sampling (Eqs. 3-5)
-        k = min(self.config.max_num_considered_actions, len(valid_actions))
-        actions, gumbel_values = gumbel_top_k(key, policy_logits, valid_actions, k)
-
-        # Sequential Halving with full MCTS (Algorithm 2)
         selected_action = sequential_halving(
             actions,
             gumbel_values,
-            policy_logits,
+            root.policy_logits,
             root,
             self.model,
             self.config,
             min_max_stats,
         )
 
-        # Construct improved policy using completed Q-values (Eqs. 10-11)
-        # Use v_mix (Eq. 33) for unvisited actions
+        # Construct improved policy π' = softmax(logits + σ(completedQ))  [Eq. 11]
         v_mix = compute_v_mix(root)
         min_max_stats.update(v_mix)
 
-        # Build completed Q-values for valid actions
-        completed_q = np.full(num_polys * num_polys, 0.0, dtype=np.float32)
-        for action in valid_actions:
-            if action in root.children and root.children[action].visit_count > 0:
-                completed_q[action] = root.children[action].q_value
-            else:
-                completed_q[action] = v_mix
-
-        # Normalize Q-values using tree-wide min-max stats
-        normalized_completed_q = np.zeros(num_polys * num_polys, dtype=np.float32)
-        for action in valid_actions:
-            normalized_completed_q[action] = min_max_stats.normalize(
-                completed_q[action]
-            )
-
-        # Compute sigma transformation
-        visit_counts = np.zeros(num_polys * num_polys)
-        for action, child in root.children.items():
-            visit_counts[action] = child.visit_count
-
-        sigma_values = sigma(
-            normalized_completed_q,
-            visit_counts,
-            self.config.c_visit,
-            self.config.c_scale,
+        all_actions = np.array(root.valid_actions)
+        scores = _score_actions(
+            all_actions,
+            root.policy_logits,
+            root.children,
+            min_max_stats,
+            self.config,
+            v_mix,
         )
 
-        # Improved policy: π' = softmax(logits + σ(completedQ))
-        improved_logits = policy_logits + sigma_values
-
-        # Mask invalid actions
-        mask = np.full_like(improved_logits, -np.inf)
-        for action in valid_actions:
-            mask[action] = 0.0
-        improved_logits = improved_logits + mask
-
-        # Stable softmax over valid actions
-        valid_max = improved_logits[valid_actions].max()
-        exp_logits = np.exp(improved_logits - valid_max)
-        exp_logits = np.where(np.isinf(improved_logits), 0.0, exp_logits)
-        policy = exp_logits / exp_logits.sum()
+        # Mask invalid actions and apply stable softmax
+        logit_scores = np.full(num_polys * num_polys, -np.inf, dtype=np.float32)
+        logit_scores[all_actions] = scores
+        valid_scores = logit_scores[root.valid_actions]
+        exp_scores = np.exp(valid_scores - valid_scores.max())
+        policy = np.zeros(num_polys * num_polys, dtype=np.float32)
+        policy[root.valid_actions] = exp_scores / exp_scores.sum()
 
         if return_selected_action:
-            return policy, value, selected_action
-        return policy, value
+            return policy, root.network_value, selected_action
+        return policy, root.network_value
 
 
 def run_self_play_episode(
@@ -734,14 +668,14 @@ def run_self_play_episode(
         List of experiences with improved policies and discounted returns.
     """
     env.reset()
-    search = GumbelMuZeroSearch(model, env, config)
+    search = GumbelMuZeroSearch(model, config)
 
-    experiences = []
-    rewards = []
+    step_experiences: list[Experience] = []
+    rewards: list[float] = []
     done = False
 
     while not done:
-        current_obs = make_obs(env.generators, env.pairs)
+        ideal, selectables = make_obs(env.generators, env.pairs)
         num_polys = len(env.generators)
 
         key, subkey = jax.random.split(key)
@@ -749,53 +683,41 @@ def run_self_play_episode(
             env, subkey, return_selected_action=True
         )
 
-        # Create uncompressed experience directly
-        ideal, selectables = current_obs
-        exp = Experience(
-            ideal=tuple(
-                poly.astype(np.float32) if poly.dtype != np.float32 else poly
-                for poly in ideal
-            ),
-            selectables=tuple(tuple(pair) for pair in selectables)
-            if isinstance(selectables, list)
-            else selectables,
-            policy=policy.astype(np.float32),
-            value=0.0,
-            num_polys=num_polys,
+        step_experiences.append(
+            Experience(
+                ideal=tuple(poly.astype(np.float32) for poly in ideal),
+                selectables=tuple(tuple(pair) for pair in selectables),
+                policy=policy.astype(np.float32),
+                value=0.0,
+                num_polys=num_polys,
+            )
         )
-        experiences.append(exp)
 
-        # Act with the selected root action A_{n+1}. Fallback to policy sampling
-        # only if no action is selected (e.g., no valid actions).
         if selected_action is not None:
             action = int(selected_action)
         else:
-            policy_sum = policy.sum()
-            if policy_sum > 0:
-                normalized_policy = policy / policy_sum
-            else:
-                valid_actions = get_valid_actions(env)
-                normalized_policy = np.zeros_like(policy)
-                for a in valid_actions:
-                    normalized_policy[a] = 1.0 / len(valid_actions)
-            action = int(np.random.choice(len(policy), p=normalized_policy))
-        i, j = action // num_polys, action % num_polys
+            valid_actions = get_valid_actions(env)
+            uniform = np.zeros(num_polys * num_polys)
+            for a in valid_actions:
+                uniform[a] = 1.0 / len(valid_actions)
+            action = int(np.random.choice(len(uniform), p=uniform))
 
+        i, j = action // num_polys, action % num_polys
         _, reward, terminated, truncated, _ = env.step((i, j))
         rewards.append(reward)
         done = terminated or truncated
 
-    # Compute discounted returns for value targets
-    returns = []
+    # Compute discounted returns and assign as value targets
     G = 0.0
+    returns: list[float] = []
     for r in reversed(rewards):
         G = r + config.gamma * G
         returns.insert(0, G)
 
-    for exp, ret in zip(experiences, returns):
+    for exp, ret in zip(step_experiences, returns):
         exp.value = ret
 
-    return experiences
+    return step_experiences
 
 
 def generate_self_play_data(
@@ -806,13 +728,8 @@ def generate_self_play_data(
     key: PRNGKeyArray,
 ) -> list[Experience]:
     """Generate self-play data from multiple episodes."""
-    from tqdm import tqdm
-
-    all_experiences = []
-
-    for episode in tqdm(range(num_episodes), desc="Self-play"):
+    all_experiences: list[Experience] = []
+    for _ in tqdm(range(num_episodes), desc="Self-play"):
         key, subkey = jax.random.split(key)
-        experiences = run_self_play_episode(model, env, config, subkey)
-        all_experiences.extend(experiences)
-
+        all_experiences.extend(run_self_play_episode(model, env, config, subkey))
     return all_experiences
