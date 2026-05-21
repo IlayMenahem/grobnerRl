@@ -4,11 +4,17 @@ from typing import Literal
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 from equinox import Module, filter_jit
 from jaxtyping import Array
 
 from grobnerRl.types import Observation
+
+
+def _next_pow2(n: int) -> int:
+    """Round n up to the next power of two (with a floor of 1)."""
+    return 1 if n <= 1 else 1 << (n - 1).bit_length()
 
 
 class RelationalLayer(eqx.Module):
@@ -557,36 +563,32 @@ class GrobnerPolicyValue(Module):
         else:
             ideal, selectables = obs
 
-            ideal_arrays = [jnp.asarray(p) for p in ideal]
-            lengths = [p.shape[0] for p in ideal_arrays]
-            max_len = max(lengths) if lengths else 1
+            polys_np = [np.asarray(p) for p in ideal]
+            n_polys_raw = len(polys_np)
+            max_monoms_raw = max((p.shape[0] for p in polys_np), default=1)
+            n_vars = polys_np[0].shape[1] if polys_np else 0
 
-            padded_ideal = []
-            masks = []
-            for p in ideal_arrays:
+            n_polys = _next_pow2(n_polys_raw)
+            max_monoms = _next_pow2(max_monoms_raw)
+
+            ideal_np = np.zeros((n_polys, max_monoms, n_vars), dtype=np.float32)
+            mono_mask_np = np.zeros((n_polys, max_monoms), dtype=bool)
+            poly_mask_np = np.zeros(n_polys, dtype=bool)
+            for i, p in enumerate(polys_np):
                 length = p.shape[0]
-                pad_len = max_len - length
-                if pad_len > 0:
-                    p_padded = jnp.pad(p, ((0, pad_len), (0, 0)), constant_values=0)
-                    mask = jnp.concatenate(
-                        [jnp.ones(length, dtype=bool), jnp.zeros(pad_len, dtype=bool)]
-                    )
-                else:
-                    p_padded = p
-                    mask = jnp.ones(length, dtype=bool)
-                padded_ideal.append(p_padded)
-                masks.append(mask)
+                ideal_np[i, :length] = p
+                mono_mask_np[i, :length] = True
+                poly_mask_np[i] = True
 
-            ideal_stacked = jnp.stack(padded_ideal)
-            masks_stacked = jnp.stack(masks)
-            n_polys = ideal_stacked.shape[0]
-            poly_mask = jnp.ones(n_polys, dtype=bool)
-            selectables_mask = jnp.full((n_polys, n_polys), -jnp.inf)
+            selectables_np = np.full((n_polys, n_polys), -np.inf, dtype=np.float32)
             if selectables:
                 rows, cols = zip(*selectables)
-                selectables_mask = selectables_mask.at[
-                    jnp.array(rows), jnp.array(cols)
-                ].set(0.0)
+                selectables_np[list(rows), list(cols)] = 0.0
+
+            ideal_stacked = jnp.asarray(ideal_np)
+            masks_stacked = jnp.asarray(mono_mask_np)
+            poly_mask = jnp.asarray(poly_mask_np)
+            selectables_mask = jnp.asarray(selectables_np)
 
         poly_embeddings = jax.vmap(self.embed_polynomial)(
             ideal_stacked, masks_stacked
