@@ -1,0 +1,9 @@
+gymnasium
+tqdm
+numpy
+matplotlib
+sympy
+jax
+equinox
+optax
+grain

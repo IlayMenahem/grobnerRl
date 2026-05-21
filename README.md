@@ -5,5 +5,5 @@
 setup
 
 ```bash
-python -m pip install git+https://github.com/IlayMenahem/grobnerRl
+python -m pip install -r requirements.txt
 ```
