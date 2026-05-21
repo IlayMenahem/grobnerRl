@@ -105,10 +105,13 @@ def _generate_episode_data(args):
     ideal_dist, n_simulations, c, gamma_agent, rollout_policy = args
 
     # Import here to avoid issues with multiprocessing
-    from grobnerRl.envs.deepgroebner import BuchbergerEnv, MCTSAgent
+    from grobnerRl.envs.env import BuchbergerEnv, MCTSAgent
+    from grobnerRl.envs.ideals import IdealGenerator, parse_ideal_dist
 
-    # Create environment and agent in the worker process
-    env = BuchbergerEnv(ideal_dist=ideal_dist, mode="train")
+    ideal_generator = (
+        ideal_dist if isinstance(ideal_dist, IdealGenerator) else parse_ideal_dist(ideal_dist)
+    )
+    env = BuchbergerEnv(ideal_generator=ideal_generator, mode="train")
     expert_agent = MCTSAgent(
         env,
         n_simulations=n_simulations,
@@ -125,7 +128,7 @@ def _generate_episode_data(args):
     episode_done = False
 
     while not episode_done:
-        expert_action = expert_agent.act((env.G, env.P))
+        expert_action = expert_agent.act((env.generators, env.pairs))
 
         # Convert expert action to flat index
         i, j = expert_action

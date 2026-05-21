@@ -749,17 +749,29 @@ class BuchbergerEnv(BaseEnv):
     generators: list[PolyElement]
     pairs: list[tuple[int, int]]
 
-    def __init__(self, ideal_generator: IdealGenerator, mode="eval"):
+    def __init__(
+        self,
+        ideal_generator: IdealGenerator,
+        mode: str = "eval",
+        rewards: str = "additions",
+    ):
         """
         Initialize the Buchberger environment.
 
         Parameters:
         ideal_generator: IdealGenerator - Generator for ideals to be used in the environment.
         mode: str - Mode of the environment ('train' or 'eval').
+        rewards: str - Reward scheme. 'additions' (default) returns -(1 + reduction steps)
+            per step (i.e. negative number of polynomial additions). 'reductions' returns
+            -1 per step regardless of reduction cost.
         """
+        if rewards not in ("additions", "reductions"):
+            raise ValueError("rewards must be 'additions' or 'reductions'")
+
         super().__init__(ideal_generator)
         self.ideal_generator = ideal_generator
         self.mode = mode
+        self.rewards = rewards
 
         self.generators = []
         self.pairs = []
@@ -824,14 +836,17 @@ class BuchbergerEnv(BaseEnv):
 
         # Compute the S-polynomial, and if non-zero after reduction, update the basis
         poly = spoly(self.generators[action[0]], self.generators[action[1]])
-        poly, _ = reduce(poly, self.generators)
+        poly, reduce_stats = reduce(poly, self.generators)
         if poly != 0:
             self.generators, self.pairs = update(
                 self.generators, self.pairs, poly.monic()
             )
 
         terminated = len(self.pairs) == 0
-        reward = -1 if not terminated else 0
+        if self.rewards == "additions":
+            reward = -(1 + reduce_stats["steps"]) if not terminated else 0
+        else:
+            reward = -1 if not terminated else 0
         truncated = False
 
         observation = (self.generators, self.pairs)
@@ -934,3 +949,300 @@ class GVWEnv(BaseEnv):
         terminated = not bool(self._state.get("jpairs"))
 
         return self._current_observation(), reward, terminated, False, {}
+
+
+class BuchbergerAgent:
+    """
+    An agent that follows a fixed selection strategy.
+
+    Parameters:
+    selection: str | list[str] - The selection strategy used to pick pairs
+        ('normal', 'first', 'degree', 'random', 'degree_after_reduce').
+    """
+
+    strategy: str | list[str]
+
+    def __init__(self, selection: str | list[str] = "normal"):
+        self.strategy = selection
+
+    def act(
+        self,
+        state: tuple[list[PolyElement], list[tuple[int, int]]],
+    ) -> tuple[int, int]:
+        G, P = state
+        return select(G, P, strategy=self.strategy)
+
+
+class OracleAgent:
+    """
+    An agent that computes the Groebner basis and then at each step selects the pair that
+    yields the polynomial with a lead monomial that is closest to a lead monomial of the
+    final Groebner basis.
+    """
+
+    env: "BuchbergerEnv"
+    reductions: list[tuple[int, int]]
+
+    def __init__(self, env: "BuchbergerEnv"):
+        self.env = env
+        self.reductions = []
+
+    def act(
+        self,
+        state: tuple[list[PolyElement], list[tuple[int, int]]],
+    ) -> tuple[int, int] | None:
+        if self.reductions:
+            return self.reductions.pop(0)
+
+        def distance(m1: tuple[int, ...], m2: tuple[int, ...]) -> int:
+            return sum(abs(a - b) for a, b in zip(m1, m2))
+
+        def groebner_lead_monomials(
+            generators: list[PolyElement],
+        ) -> list[tuple[int, ...]]:
+            basis, _ = buchberger([g.copy() for g in generators])
+            ring = generators[0].ring
+            return sorted([g.LM for g in basis], key=lambda m: ring.order(m))
+
+        def compute_reductions(
+            P: list[tuple[int, int]], G: list[PolyElement]
+        ) -> dict[tuple[int, int], PolyElement]:
+            after: dict[tuple[int, int], PolyElement] = {}
+            for pair in P:
+                i, j = pair
+                r, _ = reduce(spoly(G[i], G[j]), G)
+                if r != 0:
+                    after[pair] = r.monic()
+            return after
+
+        def select_best_pair(
+            after: dict[tuple[int, int], PolyElement],
+            targets: list[tuple[int, ...]],
+            P: list[tuple[int, int]],
+        ) -> tuple[int, int] | None:
+            best: tuple[int, int] | None = min(
+                after.keys(),
+                key=lambda p: min(distance(after[p].LM, m) for m in targets),
+                default=None,
+            )
+            if best is None and len(P) > 0:
+                best = P[0]
+            return best
+
+        def perform_reduction_step(
+            best_pair: tuple[int, int],
+            G: list[PolyElement],
+            P: list[tuple[int, int]],
+        ) -> tuple[list[PolyElement], list[tuple[int, int]], bool]:
+            P.remove(best_pair)
+            i, j = best_pair
+            r, _ = reduce(spoly(G[i], G[j]), G)
+            if r == 0:
+                return G, P, False
+            G, P = update(G, P, r.monic())
+            return G, P, True
+
+        if not self.env.generators:
+            return None
+
+        targets = groebner_lead_monomials(self.env.generators)
+
+        G: list[PolyElement] = [g.copy() for g in self.env.generators]
+        P: list[tuple[int, int]] = list(self.env.pairs)
+
+        while len(P) > 0:
+            after = compute_reductions(P, G)
+            best_pair = select_best_pair(after, targets, P)
+            if best_pair is None:
+                break
+            self.reductions.append(best_pair)
+            G, P, _ = perform_reduction_step(best_pair, G, P)
+
+        return self.reductions.pop(0) if self.reductions else None
+
+
+class MCTSNode:
+    """
+    A node in the MCTS tree.
+
+    Parameters:
+    state: tuple | None - The state (G, P) at this node.
+    parent: MCTSNode | None - The parent node.
+    action: tuple[int, int] | None - The action that led to this node.
+    """
+
+    state: tuple[list[PolyElement], list[tuple[int, int]]] | None
+    parent: "MCTSNode | None"
+    action: tuple[int, int] | None
+    children: list["MCTSNode"]
+    visits: int
+    value: float
+    untried_actions: list[tuple[int, int]]
+
+    def __init__(
+        self,
+        state: tuple[list[PolyElement], list[tuple[int, int]]] | None,
+        parent: "MCTSNode | None",
+        action: tuple[int, int] | None,
+    ):
+        self.state = state
+        self.parent = parent
+        self.action = action
+        self.children = []
+        self.visits = 0
+        self.value = 0.0
+        self.untried_actions = list(state[1]) if state is not None else []
+
+    def is_fully_expanded(self) -> bool:
+        return len(self.untried_actions) == 0
+
+    def is_terminal(self) -> bool:
+        return self.state is None or len(self.state[1]) == 0
+
+    def get_untried_action(self) -> tuple[int, int] | None:
+        if len(self.untried_actions) > 0:
+            return self.untried_actions.pop(0)
+        return None
+
+    def add_child(
+        self,
+        action: tuple[int, int],
+        state: tuple[list[PolyElement], list[tuple[int, int]]] | None,
+    ) -> "MCTSNode":
+        child = MCTSNode(state=state, parent=self, action=action)
+        self.children.append(child)
+        return child
+
+    def best_child(self, c: float) -> "MCTSNode":
+        def ucb1(child: "MCTSNode") -> float:
+            if child.visits == 0:
+                return float("inf")
+            exploit = child.value / child.visits
+            explore = c * np.sqrt(np.log(self.visits) / child.visits)
+            return exploit + explore
+
+        return max(self.children, key=ucb1)
+
+
+class MCTSAgent:
+    """
+    An agent that uses MCTS (Monte Carlo Tree Search) to optimize pair selection.
+
+    Parameters:
+    env: BuchbergerEnv - The Buchberger environment to use for simulations.
+    n_simulations: int - Number of MCTS simulations to run per action selection.
+    c: float - Exploration constant for UCB1 formula.
+    gamma: float - Discount factor for future rewards.
+    rollout_policy: str - Policy to use for rollouts ('random', 'normal', 'degree', 'first').
+    """
+
+    env: "BuchbergerEnv"
+    n_simulations: int
+    c: float
+    gamma: float
+    rollout_agent: BuchbergerAgent
+
+    def __init__(
+        self,
+        env: "BuchbergerEnv",
+        n_simulations: int = 50,
+        c: float = 1.0,
+        gamma: float = 0.99,
+        rollout_policy: str = "normal",
+    ):
+        self.env = env
+        self.n_simulations = n_simulations
+        self.c = c
+        self.gamma = gamma
+        self.rollout_agent = BuchbergerAgent(selection=rollout_policy)
+
+    def act(
+        self,
+        state: tuple[list[PolyElement], list[tuple[int, int]]],
+    ) -> tuple[int, int] | None:
+        G, P = state
+        if len(P) == 0:
+            return None
+        if len(P) == 1:
+            return P[0]
+
+        root = MCTSNode(state=state, parent=None, action=None)
+        for _ in range(self.n_simulations):
+            self._run_simulation(root, G, P)
+
+        return self._select_best_action(root)
+
+    def _run_simulation(
+        self,
+        root: MCTSNode,
+        G: list[PolyElement],
+        P: list[tuple[int, int]],
+    ) -> None:
+        sim_env = self._copy_env_state(G, P)
+        node = root
+        node = self._select_node(node, sim_env)
+        node = self._expand_node(node, sim_env)
+        total_reward = self._rollout(sim_env)
+        self._backpropagate(node, total_reward)
+
+    def _select_node(self, node: MCTSNode, sim_env: "BuchbergerEnv") -> MCTSNode:
+        while node.is_fully_expanded() and not node.is_terminal():
+            node = node.best_child(self.c)
+            if node.action is None:
+                break
+            _, _, terminated, truncated, _ = sim_env.step(node.action)
+            if terminated or truncated:
+                break
+        return node
+
+    def _expand_node(self, node: MCTSNode, sim_env: "BuchbergerEnv") -> MCTSNode:
+        if not node.is_terminal():
+            action = node.get_untried_action()
+            if action is not None:
+                obs, _, terminated, truncated, _ = sim_env.step(action)
+                child_state = obs if not (terminated or truncated) else None
+                node = node.add_child(action, child_state)
+        return node
+
+    def _rollout(self, sim_env: "BuchbergerEnv") -> float:
+        total_reward = 0.0
+        discount = 1.0
+        terminated = False
+        truncated = False
+
+        while not (terminated or truncated):
+            if len(sim_env.pairs) == 0:
+                break
+            state = (sim_env.generators, sim_env.pairs)
+            action = self.rollout_agent.act(state)
+            _, reward, terminated, truncated, _ = sim_env.step(action)
+            total_reward += discount * reward
+            discount *= self.gamma
+
+        return total_reward
+
+    def _backpropagate(self, node: MCTSNode | None, total_reward: float) -> None:
+        while node is not None:
+            node.visits += 1
+            node.value += total_reward
+            node = node.parent
+
+    def _select_best_action(self, root: MCTSNode) -> tuple[int, int] | None:
+        if not root.children:
+            return None
+        best_child = max(root.children, key=lambda c: c.visits)
+        return best_child.action
+
+    def _copy_env_state(
+        self,
+        G: list[PolyElement],
+        P: list[tuple[int, int]],
+    ) -> "BuchbergerEnv":
+        env_copy = BuchbergerEnv(
+            ideal_generator=self.env.ideal_generator,
+            mode=self.env.mode,
+            rewards=self.env.rewards,
+        )
+        env_copy.generators = [g.copy() for g in G]
+        env_copy.pairs = list(P)
+        return env_copy
