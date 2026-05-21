@@ -47,7 +47,6 @@ class RelationalLayer(eqx.Module):
 
         self.layer_norm = eqx.nn.LayerNorm(embedding_dim)
 
-    @eqx.filter_jit
     def __call__(self, x: Array, mask: Array | None = None) -> Array:
         """
         Args:
@@ -116,7 +115,6 @@ class RelationalIdealModel(eqx.Module):
             RelationalLayer(embedding_dim, hidden_dim, keys[i]) for i in range(depth)
         ]
 
-    @eqx.filter_jit
     def __call__(self, ideal_embeddings: Array, mask: Array | None = None) -> Array:
         """
         Args:
@@ -138,7 +136,6 @@ class MonomialEmbedder(Module):
     def __init__(self, monomial_dim: int, embedding_dim: int, key: Array):
         self.linear = eqx.nn.Linear(monomial_dim, embedding_dim, key=key)
 
-    @filter_jit
     def __call__(self, monomials: Array) -> Array:
         """
         Args:
@@ -189,7 +186,6 @@ class PolynomialEmbedder(Module):
         self.phi_norm = eqx.nn.LayerNorm(hidden_dim)
         self.pool_norm = eqx.nn.LayerNorm(hidden_dim)
 
-    @filter_jit
     def __call__(
         self,
         polynomial: Array,
@@ -260,7 +256,6 @@ class TransformerEncoderLayer(Module):
         )
         self.layer_norm2 = eqx.nn.LayerNorm(embedding_dim)
 
-    @filter_jit
     def __call__(self, x: Array, mask: Array | None = None) -> Array:
         # x: (seq_len, embedding_dim)
 
@@ -308,7 +303,6 @@ class IdealModel(Module):
             for i in range(depth)
         ]
 
-    @filter_jit
     def __call__(self, ideal_embeddings: Array, mask: Array | None = None) -> Array:
         """
         Args:
@@ -343,7 +337,6 @@ class PairwiseScorer(Module):
         self.W = scale * jax.random.normal(key, (embedding_dim, embedding_dim))
         self.bias = jnp.zeros(())
 
-    @filter_jit
     def __call__(self, embeddings: Array) -> Array:
         """
         Args:
