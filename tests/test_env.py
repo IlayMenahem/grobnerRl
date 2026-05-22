@@ -40,9 +40,7 @@ class DummyIdealGenerator(IdealGenerator):
 
 
 def expected_token(poly):
-    coeffs = np.array(list(map(int, poly.coeffs())), dtype=int).reshape((-1, 1))
-    monoms = np.array(poly.monoms(), dtype=int)
-    return np.concatenate((coeffs, monoms), axis=1)
+    return np.array(poly.monoms())
 
 
 def test_tokenize_returns_expected_arrays():
@@ -1222,3 +1220,99 @@ def test_gvw_env_with_field_characteristic():
     assert len(env.generators) > 0
     reduced_basis = interreduce(minimalize(env.generators)) if env.generators else []
     assert_reduced_groebner_basis(reduced_basis)
+
+
+# ===========================
+# Additional coverage tests
+# ===========================
+
+
+def test_buchberger_env_invalid_rewards_raises():
+    with pytest.raises(ValueError, match="rewards must be"):
+        BuchbergerEnv(DummyIdealGenerator([[x]]), rewards="bogus")
+
+
+def test_buchberger_env_rewards_reductions_returns_minus_one_per_step():
+    env = BuchbergerEnv(
+        DummyIdealGenerator([[x**2 + y, x * y + 1]]),
+        mode="eval",
+        rewards="reductions",
+    )
+    env.reset()
+    _, reward, terminated, _, _ = env.step((0, 1))
+    assert reward == -1
+    assert terminated is False
+
+
+def test_buchberger_env_additions_reward_counts_reduction_steps():
+    env = BuchbergerEnv(
+        DummyIdealGenerator([[x**2 + y, x * y + 1]]),
+        mode="eval",
+        rewards="additions",
+    )
+    env.reset()
+    _, reward, _, _, _ = env.step((0, 1))
+    assert reward == -1
+
+
+def test_buchberger_env_integer_action_round_trips():
+    env = BuchbergerEnv(DummyIdealGenerator([[x**2 + y, x * y + 1]]), mode="eval")
+    env.reset()
+    pair = env.pairs[0]
+    flat = pair[0] * len(env.generators) + pair[1]
+    env.step(flat)
+    assert pair not in env.pairs
+
+
+def test_make_obs_returns_independent_pairs_list():
+    pairs = [(0, 1), (1, 2)]
+    _, obs_pairs = make_obs([x + y], pairs)
+    obs_pairs.append((0, 0))
+    assert pairs == [(0, 1), (1, 2)]
+
+
+def test_select_unknown_strategy_raises():
+    with pytest.raises(ValueError, match="unknown selection strategy"):
+        select([x, y], [(0, 1)], strategy="not_a_strategy")
+
+
+def test_select_random_is_seeded_via_numpy():
+    np.random.seed(0)
+    a = select([x, y, x * y], [(0, 1), (0, 2), (1, 2)], strategy="random")
+    np.random.seed(0)
+    b = select([x, y, x * y], [(0, 1), (0, 2), (1, 2)], strategy="random")
+    assert a == b
+
+
+def test_buchberger_empty_input_returns_zero_stats():
+    basis, stats = buchberger([])
+    assert basis == []
+    assert stats == {
+        "zero_reductions": 0,
+        "nonzero_reductions": 0,
+        "total_reduction_steps": 0,
+        "pairs_processed": 0,
+    }
+
+
+def test_gvw_env_step_with_invalid_action_type_raises_type_error():
+    env = GVWEnv(DummyIdealGenerator([[x + y]]), mode="eval")
+    env.reset()
+    with pytest.raises(TypeError, match="action must be"):
+        env.step(1.5)  # type: ignore[arg-type]
+
+
+def test_gvw_env_step_with_negative_index_raises_index_error():
+    env = GVWEnv(DummyIdealGenerator([[x + y]]), mode="eval")
+    env.reset()
+    with pytest.raises(IndexError, match="action index out of range"):
+        env.step(-1)
+
+
+def test_gvw_env_step_after_termination_raises_value_error():
+    env = GVWEnv(DummyIdealGenerator([[x]]), mode="eval")
+    env.reset()
+    while env.pairs:
+        env.step(0)
+    with pytest.raises(ValueError, match="no pairs available"):
+        env.step(0)
