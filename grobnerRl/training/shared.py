@@ -375,7 +375,6 @@ def train_policy_value(
         Tuple of (trained_model, new_opt_state, mean_metrics).
     """
 
-    @eqx.filter_jit
     def make_step(
         model: GrobnerPolicyValue,
         opt_state: optax.OptState,

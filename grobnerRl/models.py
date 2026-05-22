@@ -479,9 +479,7 @@ class GrobnerPolicyValue(Module):
         self.value_head = value_head
 
     @filter_jit
-    def embed_polynomial(
-        self, poly_tokens: Array, mask: Array | None = None
-    ) -> Array:
+    def embed_polynomial(self, poly_tokens: Array, mask: Array | None = None) -> Array:
         """
         Embed a single polynomial into the per-polynomial embedding space.
 
@@ -529,9 +527,7 @@ class GrobnerPolicyValue(Module):
         masked_ctx = jnp.where(poly_mask[:, None], ctx, 0.0)
         num_valid = jnp.sum(poly_mask) + 1e-9
         pooled_mean = jnp.sum(masked_ctx, axis=0) / num_valid
-        pooled_max = jnp.max(
-            jnp.where(poly_mask[:, None], ctx, -jnp.inf), axis=0
-        )
+        pooled_max = jnp.max(jnp.where(poly_mask[:, None], ctx, -jnp.inf), axis=0)
         pooled_max = jnp.where(jnp.isneginf(pooled_max), 0.0, pooled_max)
         pooled = jnp.concatenate([pooled_mean, pooled_max], axis=-1)
         value = self.value_head(pooled).squeeze(-1)
@@ -583,9 +579,7 @@ class GrobnerPolicyValue(Module):
             poly_mask = jnp.asarray(poly_mask_np)
             selectables_mask = jnp.asarray(selectables_np)
 
-        poly_embeddings = jax.vmap(self.embed_polynomial)(
-            ideal_stacked, masks_stacked
-        )
+        poly_embeddings = jax.vmap(self.embed_polynomial)(ideal_stacked, masks_stacked)
         return self.policy_value_from_embeddings(
             poly_embeddings, poly_mask, selectables_mask
         )

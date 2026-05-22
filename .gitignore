@@ -12,9 +12,12 @@ grobnerRl.egg-info
 .DS_Store
 .coverage
 temp.py
-oren.py
 figs
 models
 material
 logs
 replay_buffer
+
+AGENTS.md
+LEAN-CTX.md
+settings.local.json.bak
