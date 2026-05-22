@@ -1050,17 +1050,76 @@ def test_gvw_env_matches_gvw_buchberger_result():
     assert set(env_basis) == set(expected_basis)
 
 
-def test_gvw_env_reward_is_always_negative_one():
-    """Test that reward is always -1 for each step."""
-    env = GVWEnv(DummyIdealGenerator([[x**2 - y, x * y - 1]]), mode="eval")
+def test_gvw_env_invalid_rewards_raises():
+    """Test that invalid rewards argument raises ValueError."""
+    with pytest.raises(ValueError, match="rewards must be 'additions' or 'reductions'"):
+        GVWEnv(DummyIdealGenerator([[x + y]]), rewards="bogus")
+
+
+def test_gvw_env_default_rewards_is_additions():
+    """Test that the default reward scheme is 'additions'."""
+    env = GVWEnv(DummyIdealGenerator([[x + y]]))
+    assert env.rewards == "additions"
+
+
+def test_gvw_env_rewards_reductions_returns_negative_one():
+    """Test that 'reductions' mode returns -1 for every non-terminal step."""
+    env = GVWEnv(
+        DummyIdealGenerator([[x**2 - y, x * y - 1]]), mode="eval", rewards="reductions"
+    )
+    env.reset()
+
+    non_terminal_rewards = []
+    final_reward = None
+    while env.pairs:
+        _, reward, terminated, _, _ = env.step(0)
+        if terminated:
+            final_reward = reward
+        else:
+            non_terminal_rewards.append(reward)
+
+    assert non_terminal_rewards  # at least one non-terminal step occurred
+    assert all(r == -1 for r in non_terminal_rewards)
+    assert final_reward == 0
+
+
+def test_gvw_env_rewards_additions_returns_step_cost():
+    """Test that 'additions' mode returns -(1 + reduction_steps) per step."""
+    env = GVWEnv(
+        DummyIdealGenerator([[x**2 - y, x * y - 1]]), mode="eval", rewards="additions"
+    )
     env.reset()
 
     rewards = []
     while env.pairs:
-        _, reward, _, _, _ = env.step(0)
-        rewards.append(reward)
+        _, reward, terminated, _, _ = env.step(0)
+        if not terminated:
+            rewards.append(reward)
 
-    assert all(r == -1 for r in rewards)
+    assert rewards
+    assert all(r <= -1 for r in rewards)
+    # At least one step in this ideal should trigger a regular top reduction,
+    # producing reward strictly less than -1.
+    assert any(r < -1 for r in rewards)
+
+
+def test_gvw_env_terminal_reward_is_zero():
+    """Test that terminal step reward is 0 in both reward modes."""
+    for mode in ("additions", "reductions"):
+        env = GVWEnv(
+            DummyIdealGenerator([[x * y - 1, x - 1]]), mode="eval", rewards=mode
+        )
+        env.reset()
+
+        last_reward = None
+        last_terminated = False
+        while env.pairs:
+            _, reward, terminated, _, _ = env.step(0)
+            last_reward = reward
+            last_terminated = terminated
+
+        assert last_terminated
+        assert last_reward == 0
 
 
 def test_gvw_env_multiple_resets():

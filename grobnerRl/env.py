@@ -282,10 +282,16 @@ def _regular_top_reduce(
     div_fn: Callable,
     mul_fn: Callable,
     order_fn: Callable,
-) -> PolyElement:
-    """Perform regular top reduction on a polynomial."""
+) -> tuple[PolyElement, dict]:
+    """Perform regular top reduction on a polynomial.
+
+    Returns:
+        Tuple of (reduced polynomial, stats) where stats contains:
+        - 'steps': number of polynomial subtractions performed
+    """
+    stats = {"steps": 0}
     if not signatures:
-        return poly
+        return poly, stats
 
     while poly != 0:
         lm_poly, lc_poly = poly.LT
@@ -298,12 +304,13 @@ def _regular_top_reduce(
             if _signature_lt(sig_mult, signature, initial_lms, mul_fn, order_fn):
                 ratio = lc_poly / reducer.LC
                 poly = poly - reducer.mul_term((mult, ratio))
+                stats["steps"] += 1
                 reduced = True
                 break
         if not reduced:
             break
 
-    return poly
+    return poly, stats
 
 
 def _is_super_top_reducible(
@@ -447,13 +454,14 @@ def _process_pair(state: dict[str, Any], index: int) -> dict[str, Any]:
         "signature": signature,
         "poly_added": False,
         "syzygy_added": False,
+        "reduction_steps": 0,
     }
 
     if _is_blocked(signature, state["syzygies"], div_fn):
         return result
 
     working_poly = poly.copy()
-    working_poly = _regular_top_reduce(
+    working_poly, reduce_stats = _regular_top_reduce(
         signature,
         working_poly,
         state["signatures"],
@@ -463,6 +471,7 @@ def _process_pair(state: dict[str, Any], index: int) -> dict[str, Any]:
         mul_fn,
         order_fn,
     )
+    result["reduction_steps"] = reduce_stats["steps"]
 
     if working_poly == 0:
         state["syzygies"].add(signature)
@@ -853,10 +862,29 @@ class BuchbergerEnv(BaseEnv):
 class GVWEnv(BaseEnv):
     """Gymnasium environment wrapping the GVW signature-based Buchberger algorithm."""
 
-    def __init__(self, ideal_generator: IdealGenerator, mode="eval"):
+    def __init__(
+        self,
+        ideal_generator: IdealGenerator,
+        mode: str = "eval",
+        rewards: str = "additions",
+    ):
+        """
+        Initialize the GVW environment.
+
+        Parameters:
+        ideal_generator: IdealGenerator - Generator for ideals to be used in the environment.
+        mode: str - Mode of the environment ('train' or 'eval').
+        rewards: str - Reward scheme. 'additions' (default) returns -(1 + reduction steps)
+            per step. 'reductions' returns -1 per step regardless of reduction cost.
+            Both schemes return 0 on the terminal step.
+        """
+        if rewards not in ("additions", "reductions"):
+            raise ValueError("rewards must be 'additions' or 'reductions'")
+
         super().__init__(ideal_generator)
         self.ideal_generator = ideal_generator
         self.mode = mode
+        self.rewards = rewards
 
         self._state: dict[str, Any] = {}
         self.generators: list[PolyElement] = []
@@ -912,7 +940,7 @@ class GVWEnv(BaseEnv):
         return index
 
     def step(
-        self, action: int | tuple[int, int]
+        self, action: int | tuple[int, int] | tuple[tuple[int, ...], int]
     ) -> tuple[
         tuple[list[ArrayLike] | list[PolyElement], list[tuple[int, int]]],
         int,
@@ -924,7 +952,8 @@ class GVWEnv(BaseEnv):
         Take a step in the environment based on the given action.
 
         Parameters:
-        action: int | tuple[int, int] - The action to take (either an integer or a signature tuple).
+        action: int | tuple[tuple[int, ...], int] - The action to take, either an
+            integer index into the current pair list or an explicit signature tuple.
 
         Returns:
         - A tuple containing the new observation, reward, termination status, truncation status, and additional info.
@@ -933,14 +962,17 @@ class GVWEnv(BaseEnv):
             raise ValueError("no pairs available to process")
 
         index = self._resolve_action(action)
-        _process_pair(self._state, index)
+        result = _process_pair(self._state, index)
 
         # Update instance variables to reflect state changes
         self.generators = self._state["generators"]
         self.pairs = self._state["pairs"]
 
-        reward = -1
         terminated = not bool(self._state.get("jpairs"))
+        if self.rewards == "additions":
+            reward = -(1 + result.get("reduction_steps", 0)) if not terminated else 0
+        else:
+            reward = -1 if not terminated else 0
 
         return self._current_observation(), reward, terminated, False, {}
 
