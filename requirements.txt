@@ -1,9 +1,15 @@
-gymnasium
+pytest
+ruff
+
 tqdm
-numpy
 matplotlib
+
+numpy
 sympy
+
+gymnasium
 jax
+jaxtyping
 equinox
 optax
 grain
