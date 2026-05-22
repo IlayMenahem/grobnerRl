@@ -166,7 +166,7 @@ def get_leading_terms(basis: list[PolyElement]) -> set[tuple[int, ...]]:
 
 def lm_by_pair(
     env: BaseEnv, G: list[PolyElement], pairs: list[tuple[int, int]]
-) -> dict[tuple[int, int], PolyElement]:
+) -> dict[tuple[int, int], tuple[int, ...]]:
     """
     Get the leading monomial of the polynomial that would be yielded by the pair reduction.
 
@@ -176,7 +176,7 @@ def lm_by_pair(
     - pairs (list[tuple[int, int]]): The pairs we can reduce
 
     Returns:
-    - dict[tuple[int, int], PolyElement]: A dictionary mapping each pair to its leading monomial.
+    - dict[tuple[int, int], tuple[int, ...]]: A dictionary mapping each pair to its leading monomial.
     """
     leading_monomial_by_pair = {}
 
@@ -371,7 +371,7 @@ class ClosestLMExpert(BasisBasedExpert):
         best_pair = min(
             leading_monomial_by_pair.keys(),
             key=lambda pair: min(
-                distance(leading_monomial_by_pair[pair].LM, lt)
+                distance(leading_monomial_by_pair[pair], lt)
                 for lt in self.leading_terms
             ),
             default=P[0],
