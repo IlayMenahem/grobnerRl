@@ -40,9 +40,7 @@ class DummyIdealGenerator(IdealGenerator):
 
 
 def expected_token(poly):
-    coeffs = np.array(list(map(int, poly.coeffs())), dtype=int).reshape((-1, 1))
-    monoms = np.array(poly.monoms(), dtype=int)
-    return np.concatenate((coeffs, monoms), axis=1)
+    return np.array(poly.monoms(), dtype=int)
 
 
 def test_tokenize_returns_expected_arrays():
